@@ -1,11 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { deleteAutomation, saveAutomation, startRun } from "../lib/api";
 import { useCollection } from "../lib/hooks";
-import { computeWindow, fmtIST } from "../lib/time";
-import {
-  renderTemplate, TEMPLATE_HELP,
-  type Automation, type Device, type YoutubeSource,
-} from "../lib/types";
+import { computeWindow, fmtDayIST, fmtTimeIST } from "../lib/time";
+import { renderTemplate, type Automation, type Device, type YoutubeSource } from "../lib/types";
+import { Empty, Field, Icon, Notice, Segmented, Switch, useUi } from "../components/ui";
 
 const blank = (email: string): Automation => ({
   id: "",
@@ -21,20 +19,28 @@ const blank = (email: string): Automation => ({
 
 export default function Automations({ email, onStarted }: { email: string; onStarted: () => void }) {
   const { items, error } = useCollection<Automation>("automations");
+  const { items: devices } = useCollection<Device>("devices");
+  const { confirm, toast } = useUi();
   const [editing, setEditing] = useState<Automation | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
   if (editing)
-    return <Editor value={editing} email={email} onDone={() => setEditing(null)} />;
+    return <Editor value={editing} email={email} onDone={() => { setEditing(null); window.scrollTo(0, 0); }} />;
 
-  async function start(a: Automation) {
+  async function startAutomation(a: Automation) {
     const { start, end } = computeWindow(a.startTime, a.endTime);
-    if (!confirm(`Start "${a.name}"?\nCounts from ${fmtIST(start)} to ${fmtIST(end)}, then sends the SMS.`)) return;
+    const ok = await confirm({
+      title: `Start “${a.name}”?`,
+      body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.`,
+      confirm: "Start",
+    });
+    if (!ok) return;
     setBusy(a.id);
     setMsg(null);
     try {
       await startRun(a, email);
+      toast("Started. The counter will begin at the start time.");
       onStarted();
     } catch (e) {
       setMsg((e as Error).message);
@@ -43,35 +49,59 @@ export default function Automations({ email, onStarted }: { email: string; onSta
     }
   }
 
+  const deviceName = (id: string) => devices.find((d) => d.id === id)?.label;
+
   return (
     <div>
-      <div className="row between">
-        <h2>Automations</h2>
-        <button className="primary" onClick={() => setEditing(blank(email))}>+ New</button>
+      <div className="page-head">
+        <div>
+          <h1>Automations</h1>
+          <p>Saved setups you can start with one tap.</p>
+        </div>
+        {items.length > 0 && (
+          <button className="btn btn-primary" onClick={() => setEditing(blank(email))}>
+            <Icon name="plus" size={16} /> New
+          </button>
+        )}
       </div>
-      {error && <p className="error">{error}</p>}
-      {msg && <p className="error">{msg}</p>}
-      {items.length === 0 && <p className="muted">No automations yet. Tap “+ New” to make one.</p>}
-      {items.map((a) => (
-        <div className="card" key={a.id}>
-          <div className="row between">
-            <div>
-              <h3>{a.name || "Untitled"}</h3>
-              <div className="muted small">
-                {a.startTime}–{a.endTime} IST · {a.youtube.length} YouTube
-                {a.zoom.enabled ? " · Zoom" : ""} · SMS to {a.sms.to || "?"}
+
+      {error && <Notice tone="error">{error}</Notice>}
+      {msg && <Notice tone="error">{msg}</Notice>}
+
+      {items.length === 0 && !error && (
+        <Empty icon="timer" title="No automations yet"
+          text="Create one with your YouTube links, the Zoom meeting and the SMS format. You can reuse it every day."
+          action={<button className="btn btn-primary" onClick={() => setEditing(blank(email))}><Icon name="plus" size={16} /> New automation</button>} />
+      )}
+
+      <div className="grid-cards">
+        {items.map((a) => {
+          const { start } = computeWindow(a.startTime, a.endTime);
+          const sender = deviceName(a.sms.senderDeviceId);
+          return (
+            <div className="card card-pad" key={a.id}>
+              <div className="card-title">{a.name || "Untitled"}</div>
+              <div className="auto-time">{a.startTime} – {a.endTime}<small>IST</small></div>
+              <div className="auto-next">Next run {fmtDayIST(start).toLowerCase()}</div>
+              <div className="chips" style={{ marginTop: 14 }}>
+                {a.youtube.length > 0 && <span className="chip"><Icon name="video" size={14} /><span>{a.youtube.length} YouTube</span></span>}
+                {a.zoom.enabled && <span className="chip"><Icon name="users" size={14} /><span>Zoom</span></span>}
+                <span className="chip"><Icon name="message" size={14} /><span>{a.sms.to || "No number"}{sender ? ` · via ${sender}` : ""}</span></span>
+              </div>
+              <div className="auto-actions">
+                <button className="btn btn-accent" disabled={busy === a.id} onClick={() => startAutomation(a)}>
+                  <Icon name="play" size={14} /> {busy === a.id ? "Starting…" : "Start"}
+                </button>
+                <button className="btn" onClick={() => setEditing(a)}><Icon name="pencil" size={15} /> Edit</button>
+                <button className="btn btn-icon" aria-label="Duplicate" title="Duplicate"
+                  onClick={() => setEditing({ ...structuredClone(a), id: "", name: a.name + " (copy)" })}>
+                  <Icon name="copy" size={16} />
+                </button>
               </div>
             </div>
-          </div>
-          <div className="row">
-            <button className="primary" disabled={busy === a.id} onClick={() => start(a)}>
-              {busy === a.id ? "Starting…" : "▶ Start"}
-            </button>
-            <button onClick={() => setEditing(a)}>Edit</button>
-            <button onClick={() => setEditing({ ...a, id: "", name: a.name + " (copy)" })}>Copy</button>
-          </div>
-        </div>
-      ))}
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -79,122 +109,195 @@ export default function Automations({ email, onStarted }: { email: string; onSta
 function Editor({ value, email, onDone }: { value: Automation; email: string; onDone: () => void }) {
   const [a, setA] = useState<Automation>(structuredClone(value));
   const { items: devices } = useCollection<Device>("devices");
+  const { confirm, toast } = useUi();
   const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const tplRef = useRef<HTMLTextAreaElement>(null);
   const set = (patch: Partial<Automation>) => setA({ ...a, ...patch });
   const setYt = (i: number, patch: Partial<YoutubeSource>) =>
     set({ youtube: a.youtube.map((y, j) => (j === i ? { ...y, ...patch } : y)) });
+  const setZoom = (patch: Partial<Automation["zoom"]>) => set({ zoom: { ...a.zoom, ...patch } });
+  const setSms = (patch: Partial<Automation["sms"]>) => set({ sms: { ...a.sms, ...patch } });
 
-  const sample: Record<string, string | number> = { name: a.name, date: new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }) };
-  a.youtube.forEach((y, i) => (sample[y.key] = 1000 + i * 111));
-  if (a.zoom.enabled) sample[a.zoom.key] = 250;
+  const sample: Record<string, string | number> = {
+    name: a.name || "Satsang",
+    date: new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }),
+  };
+  a.youtube.forEach((y, i) => (sample[y.key] = 1240 + i * 315));
+  if (a.zoom.enabled) sample[a.zoom.key] = 286;
+  const tokens = ["name", "date", ...a.youtube.map((y) => y.key), ...(a.zoom.enabled ? [a.zoom.key] : [])];
+
+  function insertToken(t: string) {
+    const el = tplRef.current;
+    const text = `{${t}}`;
+    const s = el?.selectionStart ?? a.sms.template.length;
+    const e = el?.selectionEnd ?? s;
+    const next = a.sms.template.slice(0, s) + text + a.sms.template.slice(e);
+    setSms({ template: next });
+    requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(s + text.length, s + text.length); });
+  }
 
   async function save() {
     const keys = [...a.youtube.map((y) => y.key), ...(a.zoom.enabled ? [a.zoom.key] : [])];
+    setErr(null);
     if (!a.name.trim()) return setErr("Give the automation a name.");
-    if (new Set(keys).size !== keys.length) return setErr("Each source needs a different key.");
-    if (keys.some((k) => !/^\w+$/.test(k))) return setErr("Keys can use only letters, numbers and _.");
-    if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube row needs a link.");
+    if (new Set(keys).size !== keys.length) return setErr("Each source needs a different SMS tag.");
+    if (keys.some((k) => !/^\w+$/.test(k))) return setErr("SMS tags can use only letters, numbers and _.");
+    if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube stream needs a link.");
     if (a.youtube.some((y) => y.mode === "window" && (!y.windowStart || !y.windowEnd)))
-      return setErr("24/7 streams need a from and to time.");
-    if (a.zoom.enabled && !a.zoom.link.trim()) return setErr("Add the Zoom link or turn Zoom off.");
-    if (!a.sms.to.trim()) return setErr("Add the destination phone number.");
+      return setErr("24×7 streams need a from and to time.");
+    if (a.zoom.enabled && !a.zoom.link.trim()) return setErr("Add the Zoom invite link, or turn Zoom off.");
+    if (!a.sms.to.trim()) return setErr("Add the phone number the SMS goes to.");
+    setSaving(true);
     try {
       await saveAutomation(a, email);
+      toast("Automation saved");
       onDone();
     } catch (e) {
       setErr((e as Error).message);
+    } finally {
+      setSaving(false);
     }
   }
 
   async function remove() {
-    if (a.id && confirm(`Delete "${a.name}"?`)) {
+    if (!a.id) return;
+    const ok = await confirm({ title: `Delete “${a.name}”?`, body: "Past runs stay in the Runs history.", confirm: "Delete", danger: true });
+    if (ok) {
       await deleteAutomation(a.id);
+      toast("Automation deleted");
       onDone();
     }
   }
 
   return (
     <div>
-      <div className="row between">
-        <h2>{a.id ? "Edit automation" : "New automation"}</h2>
-        <button className="link" onClick={onDone}>Cancel</button>
-      </div>
-
-      <div className="card">
-        <label>Name<input value={a.name} onChange={(e) => set({ name: e.target.value })} placeholder="Satsang daily" /></label>
-        <div className="row">
-          <label>Start (IST)<input type="time" value={a.startTime} onChange={(e) => set({ startTime: e.target.value })} /></label>
-          <label>End (IST)<input type="time" value={a.endTime} onChange={(e) => set({ endTime: e.target.value })} /></label>
-          <label>Check every (sec)<input type="number" min={10} max={120} value={a.pollSeconds} onChange={(e) => set({ pollSeconds: Number(e.target.value) || 20 })} /></label>
+      <button className="back" onClick={onDone}><Icon name="back" size={16} /> Automations</button>
+      <div className="page-head">
+        <div>
+          <h1>{a.id ? "Edit automation" : "New automation"}</h1>
+          <p>All times are India time (IST).</p>
         </div>
-        <p className="muted small">If the end time is earlier than the start, it ends the next day.</p>
       </div>
 
-      <h3>YouTube streams</h3>
-      {a.youtube.map((y, i) => (
-        <div className="card" key={i}>
-          <div className="row">
-            <label className="narrow">Key<input value={y.key} onChange={(e) => setYt(i, { key: e.target.value })} /></label>
-            <label>Label<input value={y.label} onChange={(e) => setYt(i, { label: e.target.value })} /></label>
-          </div>
-          <label>Link<input value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="https://www.youtube.com/watch?v=… or /live/…" /></label>
-          <div className="row">
-            <label>Type
-              <select value={y.mode} onChange={(e) => setYt(i, { mode: e.target.value as YoutubeSource["mode"] })}>
-                <option value="event">Live event (count from when it starts)</option>
-                <option value="window">24/7 stream (count only in a time window)</option>
-              </select>
-            </label>
+      <section className="card card-pad">
+        <div className="form-section-head">
+          <div><h2>Basics</h2><p>Name and the time to count.</p></div>
+        </div>
+        <Field label="Name">
+          <input className="input" value={a.name} onChange={(e) => set({ name: e.target.value })} placeholder="Satsang daily" />
+        </Field>
+        <div className="field-grid" style={{ ["--cols" as string]: 2 }}>
+          <Field label="Start"><input className="input" type="time" value={a.startTime} onChange={(e) => set({ startTime: e.target.value })} /></Field>
+          <Field label="End"><input className="input" type="time" value={a.endTime} onChange={(e) => set({ endTime: e.target.value })} /></Field>
+        </div>
+        <Field label="Check every" hint="If the end is earlier than the start, it ends the next day.">
+          <select className="input" value={a.pollSeconds} onChange={(e) => set({ pollSeconds: Number(e.target.value) })}>
+            {[10, 15, 20, 30, 45, 60, 90, 120].map((s) => <option key={s} value={s}>{s} seconds</option>)}
+            {![10, 15, 20, 30, 45, 60, 90, 120].includes(a.pollSeconds) && <option value={a.pollSeconds}>{a.pollSeconds} seconds</option>}
+          </select>
+        </Field>
+      </section>
+
+      <section className="card card-pad form-section">
+        <div className="form-section-head">
+          <div><h2>YouTube streams</h2><p>Highest live viewers for each stream.</p></div>
+        </div>
+        {a.youtube.length === 0 && <p className="muted small">No streams. Add one below.</p>}
+        {a.youtube.map((y, i) => (
+          <div className="source" key={i}>
+            <div className="source-head">
+              <div className="label"><Icon name="video" size={16} /> Stream {i + 1}</div>
+              <button className="btn btn-ghost btn-sm btn-icon" aria-label="Remove stream"
+                onClick={() => set({ youtube: a.youtube.filter((_, j) => j !== i) })}>
+                <Icon name="trash" size={15} />
+              </button>
+            </div>
+            <Field label="Link">
+              <input className="input" inputMode="url" value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="youtube.com/live/…" />
+            </Field>
+            <div className="field-grid" style={{ ["--cols" as string]: 2, gridTemplateColumns: "minmax(0,1fr) 110px" }}>
+              <Field label="Label"><input className="input" value={y.label} onChange={(e) => setYt(i, { label: e.target.value })} /></Field>
+              <Field label="SMS tag"><input className="input" value={y.key} onChange={(e) => setYt(i, { key: e.target.value })} /></Field>
+            </div>
+            <div className="field" style={{ marginTop: 16 }}>
+              <span>Stream type</span>
+              <Segmented value={y.mode} onChange={(m) => setYt(i, { mode: m })}
+                options={[{ value: "event", label: "Live event" }, { value: "window", label: "24×7 stream" }]} />
+              <span className="hint">{y.mode === "event" ? "Counted whenever it is live during the run." : "Counted only between the times below."}</span>
+            </div>
             {y.mode === "window" && (
-              <>
-                <label className="narrow">From<input type="time" value={y.windowStart ?? ""} onChange={(e) => setYt(i, { windowStart: e.target.value })} /></label>
-                <label className="narrow">To<input type="time" value={y.windowEnd ?? ""} onChange={(e) => setYt(i, { windowEnd: e.target.value })} /></label>
-              </>
+              <div className="field-grid" style={{ ["--cols" as string]: 2 }}>
+                <Field label="From"><input className="input" type="time" value={y.windowStart ?? ""} onChange={(e) => setYt(i, { windowStart: e.target.value })} /></Field>
+                <Field label="To"><input className="input" type="time" value={y.windowEnd ?? ""} onChange={(e) => setYt(i, { windowEnd: e.target.value })} /></Field>
+              </div>
             )}
           </div>
-          <button className="link danger" onClick={() => set({ youtube: a.youtube.filter((_, j) => j !== i) })}>Remove stream</button>
-        </div>
-      ))}
-      <button onClick={() => set({ youtube: [...a.youtube, { key: `yt${a.youtube.length + 1}`, label: `YouTube ${a.youtube.length + 1}`, url: "", mode: "event" }] })}>
-        + Add YouTube stream
-      </button>
+        ))}
+        <button className="btn add-source" onClick={() => set({ youtube: [...a.youtube, { key: `yt${a.youtube.length + 1}`, label: `YouTube ${a.youtube.length + 1}`, url: "", mode: "event" }] })}>
+          <Icon name="plus" size={16} /> Add stream
+        </button>
+      </section>
 
-      <h3>Zoom meeting</h3>
-      <div className="card">
-        <label className="check"><input type="checkbox" checked={a.zoom.enabled} onChange={(e) => set({ zoom: { ...a.zoom, enabled: e.target.checked } })} /> Count this Zoom meeting</label>
+      <section className="card card-pad form-section">
+        <div className="form-section-head" style={{ marginBottom: a.zoom.enabled ? 16 : 0 }}>
+          <div><h2>Zoom meeting</h2><p>Highest number of participants.</p></div>
+          <Switch on={a.zoom.enabled} onChange={(v) => setZoom({ enabled: v })} label="Count Zoom" />
+        </div>
         {a.zoom.enabled && (
           <>
-            <div className="row">
-              <label className="narrow">Key<input value={a.zoom.key} onChange={(e) => set({ zoom: { ...a.zoom, key: e.target.value } })} /></label>
-              <label>Join as name<input value={a.zoom.displayName} onChange={(e) => set({ zoom: { ...a.zoom, displayName: e.target.value } })} /></label>
+            <Field label="Invite link">
+              <input className="input" inputMode="url" value={a.zoom.link} onChange={(e) => setZoom({ link: e.target.value })} placeholder="zoom.us/j/123…?pwd=…" />
+            </Field>
+            <div className="field-grid stack-sm" style={{ ["--cols" as string]: 2 }}>
+              <Field label="Passcode" hint="Only if it isn’t in the link."><input className="input" value={a.zoom.passcode ?? ""} onChange={(e) => setZoom({ passcode: e.target.value })} /></Field>
+              <Field label="Join as"><input className="input" value={a.zoom.displayName} onChange={(e) => setZoom({ displayName: e.target.value })} /></Field>
             </div>
-            <label>Invite link<input value={a.zoom.link} onChange={(e) => set({ zoom: { ...a.zoom, link: e.target.value } })} placeholder="https://us06web.zoom.us/j/123…?pwd=…" /></label>
-            <label>Passcode (if not in link)<input value={a.zoom.passcode ?? ""} onChange={(e) => set({ zoom: { ...a.zoom, passcode: e.target.value } })} /></label>
-            <p className="muted small">The counter joins as this name, muted with camera off, and does not count itself.</p>
+            <Field label="SMS tag" hint="The counter joins muted with camera off and doesn’t count itself.">
+              <input className="input" value={a.zoom.key} onChange={(e) => setZoom({ key: e.target.value })} style={{ maxWidth: 160 }} />
+            </Field>
           </>
         )}
-      </div>
+      </section>
 
-      <h3>SMS</h3>
-      <div className="card">
-        <label>Send from phone
-          <select value={a.sms.senderDeviceId} onChange={(e) => set({ sms: { ...a.sms, senderDeviceId: e.target.value } })}>
+      <section className="card card-pad form-section">
+        <div className="form-section-head">
+          <div><h2>SMS</h2><p>Sent from a member’s phone when the run ends.</p></div>
+        </div>
+        <Field label="Send from" hint={devices.length === 0 ? "No phones yet. Install the phone app and sign in; it appears here." : undefined}>
+          <select className="input" value={a.sms.senderDeviceId} onChange={(e) => setSms({ senderDeviceId: e.target.value })}>
             <option value="">Choose a phone…</option>
-            {devices.map((d) => <option key={d.id} value={d.id}>{d.label} ({d.ownerEmail})</option>)}
+            {devices.map((d) => <option key={d.id} value={d.id}>{d.label} · {d.ownerEmail}</option>)}
           </select>
-        </label>
-        {devices.length === 0 && <p className="muted small">No phones yet. Install the Peak Counter phone app and sign in; it will appear here.</p>}
-        <label>Send to number<input type="tel" value={a.sms.to} onChange={(e) => set({ sms: { ...a.sms, to: e.target.value } })} placeholder="+91…" /></label>
-        <label>Message format<textarea rows={3} value={a.sms.template} onChange={(e) => set({ sms: { ...a.sms, template: e.target.value } })} /></label>
-        <p className="muted small">{TEMPLATE_HELP}</p>
-        <p className="preview">Preview: {renderTemplate(a.sms.template, sample)}</p>
-      </div>
+        </Field>
+        <Field label="Send to">
+          <input className="input" type="tel" value={a.sms.to} onChange={(e) => setSms({ to: e.target.value })} placeholder="+91 98765 43210" />
+        </Field>
+        <div className="field" style={{ marginTop: 16 }}>
+          <span>Message</span>
+          <textarea ref={tplRef} className="input" rows={3} value={a.sms.template} onChange={(e) => setSms({ template: e.target.value })} />
+          <div className="tokens">
+            {tokens.map((t) => <button type="button" key={t} className="token" onClick={() => insertToken(t)}>{`{${t}}`}</button>)}
+          </div>
+          <span className="hint">Tap a tag to insert it. Missing values are sent as NA.</span>
+        </div>
+        <div className="sms-preview">
+          <div className="cap">Preview</div>
+          <div className="bubble">{renderTemplate(a.sms.template, sample)}</div>
+        </div>
+      </section>
 
-      {err && <p className="error">{err}</p>}
-      <div className="row">
-        <button className="primary" onClick={save}>Save</button>
-        <button onClick={onDone}>Cancel</button>
-        {a.id && <button className="danger" onClick={remove}>Delete</button>}
+      {a.id && (
+        <div className="danger-zone">
+          <p>Delete this automation</p>
+          <button className="btn btn-danger btn-sm" onClick={remove}><Icon name="trash" size={14} /> Delete</button>
+        </div>
+      )}
+
+      <div className="actionbar">
+        {err && <div style={{ position: "absolute", left: 16, right: 16, bottom: "100%", marginBottom: 8 }}><Notice tone="error">{err}</Notice></div>}
+        <button className="btn btn-lg" onClick={onDone}>Cancel</button>
+        <button className="btn btn-primary btn-lg" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save automation"}</button>
       </div>
     </div>
   );
