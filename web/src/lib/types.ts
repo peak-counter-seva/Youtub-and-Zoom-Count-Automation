@@ -25,7 +25,8 @@ export interface Automation {
   name: string;
   startTime: string; // "HH:MM" Asia/Kolkata
   endTime: string; // "HH:MM"; earlier than start means next day
-  pollSeconds: number;
+  pollSeconds: number; // YouTube check interval
+  saveStep?: number; // save only when a count moves by at least this much (default 5)
   youtube: YoutubeSource[];
   zoom: ZoomSource;
   sms: {
