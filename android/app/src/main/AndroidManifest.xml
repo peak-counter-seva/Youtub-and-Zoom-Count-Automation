@@ -14,9 +14,9 @@
     <application
         android:name=".App"
         android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:label="Peak Counter"
-        android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
+        android:theme="@style/Theme.PeakCounter">
 
         <activity
             android:name=".MainActivity"
