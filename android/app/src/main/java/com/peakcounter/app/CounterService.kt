@@ -87,6 +87,7 @@ class CounterService : Service() {
         )
         return NotificationCompat.Builder(this, App.CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
+            .setColor(0xFF0E6B55.toInt())
             .setContentTitle("Peak Counter is on")
             .setContentText(text)
             .setContentIntent(open)
