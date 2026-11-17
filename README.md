@@ -42,16 +42,13 @@ SMS format fill-ins: `{name}`, `{date}`, and each source key, e.g. `{yt1}`, `{yt
 1. **Authentication** → Sign-in method → enable **Google** and **Email/Password**. Under Settings → Authorized domains, keep `youtub-and-zoom-count.web.app`.
 2. **Firestore Database** → create (asia-south1, production mode).
 3. **Firestore** → start collection `allowedUsers` → document id = your Gmail address in lower case → field `role` = `admin`. (Everyone else is added later from the web app.)
-4. **Project settings → Your apps**: add a **Web app** and an **Android app** (package `com.peakcounter.app`). Note the web `appId`, Android `appId`, `apiKey` and `messagingSenderId`.
+4. **Project settings → Your apps**: the Web app is already set up in `web/src/firebaseConfig.ts`. Add an **Android app** (package `com.peakcounter.app`) and note its `appId`.
 5. **Project settings → Service accounts** → *Generate new private key* (JSON file). Keep it private.
 
 ### GitHub (repository → Settings → Secrets and variables → Actions)
 | Secret | Value |
 |---|---|
 | `FIREBASE_SERVICE_ACCOUNT` | Whole JSON file from step 5 |
-| `FIREBASE_API_KEY` | `apiKey` |
-| `FIREBASE_WEB_APP_ID` | Web app `appId` |
-| `FIREBASE_SENDER_ID` | `messagingSenderId` |
 | `FIREBASE_ANDROID_APP_ID` | Android app `appId` |
 | `YOUTUBE_API_KEY` | Google Cloud → APIs → enable *YouTube Data API v3* → Credentials → API key (optional: without it the counter reads the YouTube page) |
 | `ANDROID_KEYSTORE_BASE64` + `ANDROID_KEYSTORE_PASSWORD` + `ANDROID_KEY_ALIAS` + `ANDROID_KEY_PASSWORD` | Optional: fixed signing key so phone-app updates install over the old version |

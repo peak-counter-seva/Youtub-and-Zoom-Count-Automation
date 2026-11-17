@@ -22,7 +22,7 @@ android {
         targetSdk = 35
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
-        buildConfigField("String", "FB_API_KEY", "\"${fbValue("FIREBASE_API_KEY")}\"")
+        buildConfigField("String", "FB_API_KEY", "\"${fbValue("FIREBASE_API_KEY").ifEmpty { "AIzaSyCuwAPe38FNc4HtkmoUXW1l6CEkMskC6as" }}\"")
         buildConfigField("String", "FB_APP_ID", "\"${fbValue("FIREBASE_ANDROID_APP_ID")}\"")
         buildConfigField("String", "FB_PROJECT_ID", "\"${fbValue("FIREBASE_PROJECT_ID").ifEmpty { "youtub-and-zoom-count" }}\"")
     }

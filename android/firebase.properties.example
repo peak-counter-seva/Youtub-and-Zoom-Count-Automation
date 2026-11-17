@@ -1,4 +1,4 @@
 # Copy to firebase.properties for local builds. CI reads the same names from GitHub secrets.
-FIREBASE_API_KEY=
+FIREBASE_API_KEY=AIzaSyCuwAPe38FNc4HtkmoUXW1l6CEkMskC6as
 FIREBASE_ANDROID_APP_ID=
 FIREBASE_PROJECT_ID=youtub-and-zoom-count
