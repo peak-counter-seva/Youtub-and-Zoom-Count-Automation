@@ -1,0 +1,48 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email != null; }
+    function email() { return request.auth.token.email.lower(); }
+    function approved() { return signedIn() && exists(/databases/$(database)/documents/allowedUsers/$(email())); }
+    function admin() {
+      return approved() && get(/databases/$(database)/documents/allowedUsers/$(email())).data.role == 'admin';
+    }
+
+    // Approved people. The first admin is added by hand in the Firebase console.
+    match /allowedUsers/{userEmail} {
+      allow read: if signedIn() && (userEmail == email() || approved());
+      allow write: if admin();
+    }
+
+    match /automations/{id} {
+      allow read, write: if approved();
+    }
+
+    match /runs/{id} {
+      allow read, create, update: if approved();
+      allow delete: if admin();
+    }
+
+    match /smsJobs/{id} {
+      allow read, create, update: if approved();
+      allow delete: if admin();
+    }
+
+    // Phones register themselves; only the owner can change their own phone.
+    match /devices/{id} {
+      allow read: if approved();
+      allow create: if approved() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if approved() && resource.data.ownerUid == request.auth.uid || admin();
+    }
+
+    // GitHub token and YouTube API key.
+    match /config/{name} {
+      allow read: if approved();
+      allow write: if admin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

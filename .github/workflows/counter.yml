@@ -1,0 +1,51 @@
+name: counter
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Firestore run id
+        required: true
+      continuation:
+        description: Set by the counter when it hands over after ~5.5 hours
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  actions: write # lets a long run start its own continuation job
+
+concurrency:
+  group: run-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    defaults:
+      run:
+        working-directory: counter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: counter/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Count
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: xvfb-run -a python main.py --run-id "${{ inputs.run_id }}"
+      - name: Save Zoom screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zoom-screenshots-${{ inputs.run_id }}-${{ github.run_attempt }}
+          path: counter/zoom-screenshots
+          if-no-files-found: ignore
+          retention-days: 3
