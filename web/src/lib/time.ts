@@ -34,3 +34,20 @@ export function fmtIST(d: Date | null | undefined): string {
     minute: "2-digit",
   });
 }
+
+/** "19:05" in India time. */
+export function fmtTimeIST(d: Date | null | undefined): string {
+  if (!d) return "–";
+  return d.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" });
+}
+
+/** "Today", "Tomorrow", "Yesterday" or "17 Nov" in India time. */
+export function fmtDayIST(d: Date | null | undefined, now = new Date()): string {
+  if (!d) return "–";
+  const key = (x: Date) => x.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const diff = Math.round((Date.parse(key(d)) - Date.parse(key(now))) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff === -1) return "Yesterday";
+  return d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" });
+}
