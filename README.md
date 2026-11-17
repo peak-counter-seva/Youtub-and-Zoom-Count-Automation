@@ -26,7 +26,7 @@ your phone (SMS + backup).
 ## How a run works
 
 1. You press **Start** on an automation. The web app saves a run (with a copy of the settings) and starts the GitHub `counter` job.
-2. The counter waits for the start time, then every N seconds reads each YouTube stream's live viewers and the Zoom participant count, keeping the highest values.
+2. The counter waits for the start time, then reads YouTube every N seconds (20 by default) and Zoom every 3 seconds. It keeps the exact highest values and saves to Firebase only when a count changes by your chosen step (±5 by default), plus once a minute.
    * **Live event** streams count whenever they are live inside the run.
    * **24/7** streams count only inside their from–to window.
    * **Zoom**: the counter joins the meeting from a browser as a muted guest with the name you set, and subtracts itself.
@@ -65,4 +65,4 @@ Then create a **fine-grained personal access token** (GitHub → Settings → De
 * GitHub may start the counter 10–60 seconds after you press Start. Press Start a few minutes early; it waits for the start time.
 * YouTube refreshes its viewer number about every 30 seconds, so a very short spike can be missed.
 * Zoom's web page changes from time to time; if Zoom counting fails, the run log says why and screenshots are saved on the GitHub job.
-* Firebase free plan: about 20,000 writes a day. Checking every 20 s uses ~180 writes per hour per automation.
+* Firebase free plan: about 20,000 writes a day. Saving only on ±5 changes usually needs 60–200 writes per hour per automation.

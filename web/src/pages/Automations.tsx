@@ -11,6 +11,7 @@ const blank = (email: string): Automation => ({
   startTime: "19:00",
   endTime: "21:00",
   pollSeconds: 20,
+  saveStep: 5,
   youtube: [{ key: "yt1", label: "YouTube 1", url: "", mode: "event" }],
   zoom: { enabled: true, key: "zoom", label: "Zoom", link: "", passcode: "", displayName: "Count" },
   sms: { senderDeviceId: "", to: "", template: "{name} {date}: YT {yt1}, Zoom {zoom}" },
@@ -191,12 +192,22 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <Field label="Start"><input className="input" type="time" value={a.startTime} onChange={(e) => set({ startTime: e.target.value })} /></Field>
           <Field label="End"><input className="input" type="time" value={a.endTime} onChange={(e) => set({ endTime: e.target.value })} /></Field>
         </div>
-        <Field label="Check every" hint="If the end is earlier than the start, it ends the next day.">
-          <select className="input" value={a.pollSeconds} onChange={(e) => set({ pollSeconds: Number(e.target.value) })}>
-            {[10, 15, 20, 30, 45, 60, 90, 120].map((s) => <option key={s} value={s}>{s} seconds</option>)}
-            {![10, 15, 20, 30, 45, 60, 90, 120].includes(a.pollSeconds) && <option value={a.pollSeconds}>{a.pollSeconds} seconds</option>}
-          </select>
-        </Field>
+        <div className="field-grid stack-sm" style={{ ["--cols" as string]: 2 }}>
+          <Field label="Check YouTube every">
+            <select className="input" value={a.pollSeconds} onChange={(e) => set({ pollSeconds: Number(e.target.value) })}>
+              {[10, 15, 20, 30, 45, 60].map((s) => <option key={s} value={s}>{s} seconds</option>)}
+              {![10, 15, 20, 30, 45, 60].includes(a.pollSeconds) && <option value={a.pollSeconds}>{a.pollSeconds} seconds</option>}
+            </select>
+          </Field>
+          <Field label="Save when a count changes by">
+            <select className="input" value={a.saveStep ?? 5} onChange={(e) => set({ saveStep: Number(e.target.value) })}>
+              {[1, 2, 3, 5, 10, 20, 50].map((s) => <option key={s} value={s}>± {s}</option>)}
+            </select>
+          </Field>
+        </div>
+        <p className="hint" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+          Zoom is checked every 3 seconds. The exact highest number is always kept, even between saves. If the end is earlier than the start, it ends the next day.
+        </p>
       </section>
 
       <section className="card card-pad form-section">

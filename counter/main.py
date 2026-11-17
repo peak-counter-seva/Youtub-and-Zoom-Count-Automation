@@ -28,6 +28,66 @@ log = logging.getLogger("counter")
 
 HANDOVER_AFTER = timedelta(hours=5, minutes=30)
 ENGINE = "github"
+ZOOM_EVERY = 3          # seconds between Zoom readings (reading the page is free)
+ZOOM_RETRY_EVERY = 20   # seconds between attempts while not in the meeting
+SAVE_AT_LEAST_EVERY = 60  # seconds; keeps the website's "alive" signal fresh
+STOP_CHECK_EVERY = 15   # seconds between Stop-button checks when nothing was saved
+DEFAULT_SAVE_STEP = 5
+
+
+class Tracker:
+    """Holds the newest readings and the exact peaks locally, and decides when a save is worth it.
+
+    A save happens when any count moves by at least `step` since the last save, when a source
+    goes live/offline or its note changes, and at least once a minute. Peaks are tracked on every
+    reading, so the saved peak is exact even when it rose by less than `step`.
+    """
+
+    def __init__(self, step: int):
+        self.step = max(1, int(step))
+        self.readings: dict[str, dict] = {}
+        self.peaks: dict[str, tuple[int, datetime]] = {}
+        self.saved: dict[str, dict] = {}
+        self.last_save: float | None = None
+
+    def update(self, key: str, reading: dict, t: datetime):
+        self.readings[key] = reading
+        v = reading["value"]
+        if v is not None and (key not in self.peaks or v > self.peaks[key][0]):
+            self.peaks[key] = (v, t)
+
+    def due(self, mono: float) -> bool:
+        if not self.readings:
+            return False
+        if self.last_save is None or mono - self.last_save >= SAVE_AT_LEAST_EVERY:
+            return True
+        for key, r in self.readings.items():
+            s = self.saved.get(key)
+            if s is None:
+                return True
+            v, sv = r["value"], s["value"]
+            if (v is None) != (sv is None) or r.get("note", "") != s.get("note", ""):
+                return True
+            if v is not None and abs(v - sv) >= self.step:
+                return True
+            best = self.peaks.get(key)
+            if best and (s["peak"] is None or best[0] - s["peak"] >= self.step):
+                return True
+        return False
+
+    def payload(self) -> dict[str, dict]:
+        out = {}
+        for key, r in self.readings.items():
+            out[key] = dict(r)
+            if key in self.peaks:
+                out[key]["peak"], out[key]["peakAt"] = self.peaks[key]
+        return out
+
+    def mark_saved(self, mono: float):
+        self.last_save = mono
+        for key, r in self.readings.items():
+            best = self.peaks.get(key)
+            self.saved[key] = {"value": r["value"], "note": r.get("note", ""), "peak": best[0] if best else None}
 
 
 def init_db():
@@ -73,9 +133,11 @@ class Run:
                 p["note"] = r.get("note", "")
                 if r["value"] is not None:
                     p["lastAt"] = ts
-                    if p.get("peak") is None or r["value"] > p["peak"]:
-                        p["peak"] = r["value"]
-                        p["peakAt"] = ts
+                # The tracker passes the exact highest value seen (and when), even if it was never saved.
+                best = r.get("peak", r["value"])
+                if best is not None and (p.get("peak") is None or best > p["peak"]):
+                    p["peak"] = best
+                    p["peakAt"] = r.get("peakAt") or ts
                 peaks[key] = p
             upd = {"peaks": peaks, "heartbeatAt": ts, "engine": ENGINE}
             if status:
@@ -144,6 +206,11 @@ async def main(run_id: str):
     handed_over = False
     stopped = False
     last_zoom_status = None
+    last_error = None
+    tracker = Tracker(cfg.get("saveStep") or DEFAULT_SAVE_STEP)
+    tick = ZOOM_EVERY if zoom else poll
+    next_yt = next_zoom = 0.0
+    last_stop_check = time.monotonic()
     try:
         while True:
             t = now()
@@ -154,60 +221,82 @@ async def main(run_id: str):
                     run.note("Handing over to a fresh GitHub job (6-hour limit).")
                     handed_over = True
                     return
+            mono = time.monotonic()
             try:
-                data = await poll_once(run, yt, sources, windows, zoom, zcfg, t)
+                if sources and mono >= next_yt:
+                    next_yt = mono + poll  # set first so a failing read retries after `poll`, not every tick
+                    for key, r in read_youtube(yt, sources, windows, t).items():
+                        tracker.update(key, r, t)
+                if zoom and mono >= next_zoom:
+                    zn = await read_zoom(zoom)
+                    next_zoom = mono + (ZOOM_EVERY if zoom.joined else ZOOM_RETRY_EVERY)
+                    tracker.update(zcfg.get("key") or "zoom", {"label": zcfg.get("label") or "Zoom", "value": zn,
+                                                              "note": "" if zn is not None else zoom.status}, now())
+                last_error = None
             except Exception as e:  # noqa: BLE001 - keep counting through a bad reading
-                log.exception("poll failed")
-                run.note(f"Reading failed, will retry: {e}")
-                await asyncio.sleep(poll)
-                continue
+                log.exception("reading failed")
+                if str(e) != last_error:
+                    run.note(f"Reading failed, will retry: {e}")
+                    last_error = str(e)
             if zoom and zoom.status != last_zoom_status:
                 run.note(f"Zoom: {zoom.status}")
                 last_zoom_status = zoom.status
-            if data.get("stopRequested"):
+
+            stop = False
+            if tracker.due(mono):
+                data = run.merge_peaks(tracker.payload(), status="running")
+                tracker.mark_saved(mono)
+                last_stop_check = mono
+                stop = bool(data.get("stopRequested"))
+            elif mono - last_stop_check >= STOP_CHECK_EVERY:
+                stop = bool((run.ref.get().to_dict() or {}).get("stopRequested"))
+                last_stop_check = mono
+            if stop:
                 stopped = True
                 run.note("Stop requested.")
                 break
-            await asyncio.sleep(poll)
+            await asyncio.sleep(tick)
     finally:
+        if tracker.readings:
+            try:  # save the exact final values and peaks before the SMS is written
+                run.merge_peaks(tracker.payload())
+            except Exception:  # noqa: BLE001
+                log.exception("final save failed")
         if zoom:
             await zoom.close()
         if not handed_over:
             finish(db, run, stopped)
 
 
-async def poll_once(run, yt, sources, windows, zoom, zcfg, t) -> dict:
-            readings: dict[str, dict] = {}
+def read_youtube(yt, sources, windows, t) -> dict[str, dict]:
+    readings: dict[str, dict] = {}
+    ids = yt.ids_for([s["url"] for s in sources], time.time())
+    res = yt.read([v for v in ids.values() if v])
+    for s in sources:
+        vid = ids.get(s["url"])
+        r = res.get(vid) if vid else None
+        in_window = True
+        if s["key"] in windows:
+            ws, we = windows[s["key"]]
+            in_window = ws <= t < we
+        if r is None:
+            readings[s["key"]] = {"label": s["label"], "value": None, "note": "no live video found"}
+        elif not in_window:
+            readings[s["key"]] = {"label": s["label"], "value": None, "note": "outside its time window"}
+        elif not r.live or r.viewers is None:
+            readings[s["key"]] = {"label": s["label"], "value": None, "note": r.note or "not live yet"}
+        else:
+            readings[s["key"]] = {"label": s["label"], "value": r.viewers, "note": r.note or ""}
+    return readings
 
-            ids = yt.ids_for([s["url"] for s in sources], time.time())
-            res = yt.read([v for v in ids.values() if v])
-            for s in sources:
-                vid = ids.get(s["url"])
-                r = res.get(vid) if vid else None
-                in_window = True
-                if s["key"] in windows:
-                    ws, we = windows[s["key"]]
-                    in_window = ws <= t < we
-                if r is None:
-                    readings[s["key"]] = {"label": s["label"], "value": None, "note": "no live video found"}
-                elif not in_window:
-                    readings[s["key"]] = {"label": s["label"], "value": None, "note": "outside its time window"}
-                elif not r.live or r.viewers is None:
-                    readings[s["key"]] = {"label": s["label"], "value": None, "note": r.note or "not live yet"}
-                else:
-                    readings[s["key"]] = {"label": s["label"], "value": r.viewers, "note": r.note}
 
-            if zoom:
-                try:
-                    zn = await asyncio.wait_for(zoom.read(), timeout=300)
-                except Exception as e:  # noqa: BLE001
-                    zn = None
-                    zoom.status = f"error: {e}"
-                    await zoom.shot("error")
-                readings[zcfg.get("key") or "zoom"] = {"label": zcfg.get("label") or "Zoom", "value": zn,
-                                                        "note": "" if zn is not None else zoom.status}
-
-            return run.merge_peaks(readings, status="running")
+async def read_zoom(zoom) -> int | None:
+    try:
+        return await asyncio.wait_for(zoom.read(), timeout=300)
+    except Exception as e:  # noqa: BLE001
+        zoom.status = f"error: {e}"
+        await zoom.shot("error")
+        return None
 
 
 def finish(db, run: Run, stopped: bool):
