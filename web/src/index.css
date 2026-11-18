@@ -351,3 +351,17 @@ details.log pre { margin: 10px 0 0; font: 11.5px/1.55 ui-monospace, "SF Mono", M
 .reminder > div { flex: 1; min-width: 0; }
 .reminder b { font-size: 14px; font-weight: 600; }
 .reminder p { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
+
+/* Daily live-event links on an automation card */
+.links-bar { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); font: inherit; font-size: 13.5px; color: var(--ink-2); cursor: pointer; text-align: left; }
+.links-bar span { font-weight: 550; }
+.links-bar small { margin-left: auto; font-size: 12px; color: var(--muted); }
+.links-bar svg { color: var(--muted); flex: none; }
+.links-bar.stale { border-color: #e8d9a8; background: #fdf8e8; }
+.links-bar.stale small { color: #9a6b00; }
+.links-bar:hover { border-color: var(--accent); }
+.links-edit { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.links-edit .field + .field { margin-top: 10px; }
+.links-row { display: flex; gap: 8px; }
+.links-row .input { flex: 1; min-width: 0; }
+.links-edit .btn-row { justify-content: flex-end; }

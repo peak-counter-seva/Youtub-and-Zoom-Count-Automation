@@ -22,6 +22,12 @@ export async function saveAutomation(a: Automation, email: string, before?: Auto
   return ref.id;
 }
 
+/** Change only the YouTube links (the daily live event link), without opening the full editor. */
+export async function updateYoutubeLinks(a: Automation, urls: Record<number, string>) {
+  const youtube = a.youtube.map((y, i) => (urls[i] !== undefined ? { ...y, url: urls[i].trim() } : y));
+  await updateDoc(doc(db, "automations", a.id), { youtube, linksUpdatedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+}
+
 export async function deleteAutomation(id: string) {
   await deleteDoc(doc(db, "automations", id));
 }

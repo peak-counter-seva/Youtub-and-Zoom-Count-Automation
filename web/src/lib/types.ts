@@ -57,6 +57,7 @@ export interface Automation {
   };
   createdBy: string;
   updatedAt?: Timestamp;
+  linksUpdatedAt?: Timestamp; // last time the YouTube links were changed from the card
 }
 
 export type RunStatus = "queued" | "waiting" | "running" | "finished" | "failed" | "stopped";
