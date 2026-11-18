@@ -1,9 +1,9 @@
 import {
   addDoc, collection, deleteDoc, doc, getDoc, serverTimestamp, setDoc,
-  Timestamp, updateDoc,
+  Timestamp, updateDoc, arrayUnion,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import type { Automation, Run } from "./types";
+import { renderTemplate, type Automation, type Run } from "./types";
 import { computeWindow } from "./time";
 
 export async function saveAutomation(a: Automation, email: string) {
@@ -80,4 +80,25 @@ export async function resendSms(run: Run) {
     status: "pending",
     createdAt: serverTimestamp(),
   });
+}
+
+/** Type in a peak by hand (e.g. Zoom blocked the counter). Re-writes the SMS text if the run already finished. */
+export async function setManualPeak(run: Run, key: string, value: number, email: string) {
+  const upd: Record<string, unknown> = {
+    [`peaks.${key}.peak`]: value,
+    [`peaks.${key}.peakAt`]: serverTimestamp(),
+    [`peaks.${key}.manualBy`]: email,
+    [`peaks.${key}.label`]: run.peaks?.[key]?.label ?? key,
+    log: arrayUnion(`${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata" })} ${email} set ${key} = ${value} by hand`),
+  };
+  if (run.smsText) {
+    const values: Record<string, string | number> = {
+      name: run.automationName,
+      date: run.startAt.toDate().toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" }).replace(/\//g, "-"),
+    };
+    for (const [k, p] of Object.entries(run.peaks ?? {})) values[k] = p.peak ?? "NA";
+    values[key] = value;
+    upd.smsText = renderTemplate(run.config.sms.template, values);
+  }
+  await updateDoc(doc(db, "runs", run.id), upd);
 }

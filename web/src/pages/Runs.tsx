@@ -1,7 +1,9 @@
-import { resendSms, stopRun } from "../lib/api";
+import { useState } from "react";
+import { resendSms, setManualPeak, stopRun } from "../lib/api";
+import { auth } from "../lib/firebase";
 import { useCollection } from "../lib/hooks";
 import { fmtDayIST, fmtTimeIST } from "../lib/time";
-import type { Run } from "../lib/types";
+import type { Peak, Run } from "../lib/types";
 import { Empty, Icon, Notice, useUi } from "../components/ui";
 
 const STATUS_TEXT: Record<Run["status"], string> = {
@@ -88,17 +90,7 @@ function RunCard({ r }: { r: Run }) {
 
       {peaks.length > 0 && (
         <div className="stats">
-          {peaks.map(([k, p]) => (
-            <div className="stat" key={k}>
-              <div className="stat-label"><Icon name={k.toLowerCase().includes("zoom") ? "users" : "video"} size={14} /><span>{p.label}</span></div>
-              <div className="stat-value">{fmtN(p.peak)}</div>
-              <div className="stat-sub">
-                {active && p.current !== null && p.current !== undefined ? `Now ${fmtN(p.current)} · ` : ""}
-                {p.peakAt ? `peak ${fmtTimeIST(p.peakAt.toDate())}` : "no reading yet"}
-              </div>
-              {p.note && <div className="stat-note">{p.note}</div>}
-            </div>
-          ))}
+          {peaks.map(([k, p]) => <StatTile key={k} r={r} k={k} p={p} active={active} />)}
         </div>
       )}
 
@@ -125,6 +117,63 @@ function RunCard({ r }: { r: Run }) {
             {!active && r.smsText && <button className="btn btn-sm" onClick={resend}><Icon name="send" size={14} /> Resend SMS</button>}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function StatTile({ r, k, p, active }: { r: Run; k: string; p: Peak; active: boolean }) {
+  const { toast } = useUi();
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(p.peak?.toString() ?? "");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    const n = Number(val);
+    if (!Number.isInteger(n) || n < 0) return toast("Enter a whole number");
+    setSaving(true);
+    try {
+      await setManualPeak(r, k, n, auth.currentUser?.email ?? "someone");
+      toast(r.smsText ? "Saved. Tap Resend SMS to send the new numbers." : "Saved. It will be used in the SMS.");
+      setEditing(false);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="stat">
+      <div className="stat-label">
+        <Icon name={k.toLowerCase().includes("zoom") ? "users" : "video"} size={14} /><span>{p.label}</span>
+        {!editing && (
+          <button className="stat-edit" aria-label={`Enter ${p.label} by hand`} title="Enter by hand" onClick={() => { setVal(p.peak?.toString() ?? ""); setEditing(true); }}>
+            <Icon name="pencil" size={13} />
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="stat-form">
+          <input className="input" type="number" inputMode="numeric" min={0} autoFocus value={val}
+            onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} placeholder="Highest" />
+          <div className="btn-row">
+            <button className="btn btn-primary btn-sm" disabled={saving} onClick={save}>Save</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="stat-value">{fmtN(p.peak)}</div>
+          <div className="stat-sub">
+            {active && p.current !== null && p.current !== undefined ? `Now ${fmtN(p.current)} · ` : ""}
+            {p.manualBy ? `entered by ${p.manualBy.split("@")[0]}` : p.peakAt ? `peak ${fmtTimeIST(p.peakAt.toDate())}` : "no reading yet"}
+          </div>
+          {p.note && !p.manualBy && <div className="stat-note">{p.note}</div>}
+          {p.peak == null && p.note && (
+            <button className="btn btn-sm" style={{ marginTop: 10 }} onClick={() => { setVal(""); setEditing(true); }}>Enter by hand</button>
+          )}
+        </>
       )}
     </div>
   );
