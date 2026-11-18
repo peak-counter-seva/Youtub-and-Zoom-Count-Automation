@@ -178,6 +178,7 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
     moments.filter((m) => m.key && m.at).map((m) => ({ key: m.key, label: m.label || m.key, ...momentWindow(now, m.at, m.minutes) })),
     Object.fromEntries(moments.map((m) => [m.key, sampleMoment])),
   );
+  const unknownTags = [...new Set([...a.sms.template.matchAll(/\{([\w.]+)\}/g)].map((m) => m[1]))].filter((t) => !(t in sample));
   const tokens = [
     "name", "date", "day", ...sources.map((x) => x.key),
     ...(sources.length > 1 ? ["total"] : []), ...(a.youtube.length > 1 && a.zoom.enabled ? ["youtube"] : []), ...totals.filter((g) => g.key).map((g) => g.key),
@@ -213,7 +214,8 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
     if (!a.sms.to.trim()) return setErr("Add the phone number the SMS goes to.");
     setSaving(true);
     try {
-      await saveAutomation(a, email, a.id ? value : undefined);
+      const clean = { ...a, totals: totals.map((g) => ({ ...g, sources: g.sources.filter((k) => keys.includes(k)) })) };
+      await saveAutomation(clean, email, a.id ? value : undefined);
       toast(liveCount > 0 ? "Saved. The live run uses it within a minute." : "Automation saved");
       onDone();
     } catch (e) {
@@ -438,7 +440,7 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <div className={`source ${open === `t${i}` ? "open" : "closed"}`} key={i}>
             <RowHead open={open === `t${i}`} onToggle={() => toggle(`t${i}`)} icon="plus"
               title={g.label || `Total ${i + 1}`} tag={g.key}
-              sub={g.sources.map((k) => sources.find((x) => x.key === k)?.label ?? k).join(" + ") || "nothing ticked yet"}
+              sub={sources.filter((x) => g.sources.includes(x.key)).map((x) => x.label).join(" + ") || "nothing ticked yet"}
               onRemove={() => { set({ totals: totals.filter((_, j) => j !== i) }); setOpen(null); }} />
             {open === `t${i}` && (<div className="source-body">
             <div className="field-grid" style={{ ["--cols" as string]: 2, gridTemplateColumns: "minmax(0,1fr) 110px" }}>
@@ -531,6 +533,13 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
         <div className="sms-preview">
           <div className="cap">Preview</div>
           <div className="bubble">{renderTemplate(a.sms.template, sample)}</div>
+          {unknownTags.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <Notice tone="warn">
+                {unknownTags.map((t) => `{${t}}`).join(", ")} {unknownTags.length === 1 ? "doesn’t" : "don’t"} match any stream, total or moment, so {unknownTags.length === 1 ? "it" : "they"} would be sent as written. Tags must match exactly, including capital letters.
+              </Notice>
+            </div>
+          )}
         </div>
       </section>
 
