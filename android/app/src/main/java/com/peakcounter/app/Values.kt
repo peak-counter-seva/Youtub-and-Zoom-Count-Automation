@@ -52,6 +52,7 @@ object Values {
             val k = y["key"] as? String ?: return@forEach
             srcs += k to ((y["label"] as? String)?.ifBlank { null } ?: k)
         }
+        val ytKeys = srcs.map { it.first }
         val z = cfg["zoom"] as? Map<String, Any?>
         if (z?.get("enabled") == true) {
             srcs += ((z["key"] as? String)?.ifBlank { null } ?: "zoom") to ((z["label"] as? String)?.ifBlank { null } ?: "Zoom")
@@ -60,11 +61,13 @@ object Values {
         val v = mutableMapOf(
             "name" to (d.getString("automationName") ?: ""),
             "date" to fmt("dd-MM-yyyy", d.getTimestamp("startAt")?.seconds ?: 0),
+            "day" to fmt("d MMM yyyy", d.getTimestamp("startAt")?.seconds ?: 0),
         )
         fun total(vals: List<Long?>) = vals.filterNotNull().takeIf { it.isNotEmpty() }?.sum()?.toString() ?: "NA"
         fun fill(prefix: String, get: (String) -> Long?) {
             for ((k, _) in srcs) v[prefix + k] = get(k)?.toString() ?: "NA"
             v[prefix + "total"] = total(srcs.map { get(it.first) })
+            v[prefix + "youtube"] = total(ytKeys.map(get))
             for (g in groups) v[prefix + (g["key"] as String)] = total((g["sources"] as? List<String> ?: emptyList()).map(get))
         }
         val peaks = d.get("peaks") as? Map<String, Map<String, Any?>> ?: emptyMap()

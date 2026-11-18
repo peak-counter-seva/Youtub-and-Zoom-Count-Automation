@@ -1,0 +1,36 @@
+name: schedule
+
+# Starts automations that have "Start by itself" switched on (see counter/schedule.py).
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # starts the counter job
+
+concurrency:
+  group: schedule
+  cancel-in-progress: false
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: counter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: counter/requirements.txt
+      - run: pip install firebase-admin requests
+      - name: Start due automations
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python schedule.py

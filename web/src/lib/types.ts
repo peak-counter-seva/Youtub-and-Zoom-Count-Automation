@@ -10,6 +10,7 @@ export interface YoutubeSource {
   windowStart?: string; // "HH:MM" (Asia/Kolkata), window mode only
   windowEnd?: string;
   pollSeconds?: number; // how often to check this stream; default = automation pollSeconds
+  findTitle?: string; // live event: url is a channel link; use the channel's live stream whose title contains this
 }
 
 /** A sum of several sources, e.g. all YouTube streams. Used in the SMS as {key}. */
@@ -46,6 +47,8 @@ export interface Automation {
   endTime: string; // "HH:MM"; earlier than start means next day
   pollSeconds: number; // YouTube check interval
   saveStep?: number; // save only when a count moves by at least this much (default 5)
+  autoStart?: boolean; // start by itself before the start time (checked every few minutes on GitHub)
+  autoDays?: number[]; // weekdays to auto-start, 0 = Sunday; empty or missing = every day
   youtube: YoutubeSource[];
   zoom: ZoomSource;
   totals?: TotalGroup[];
@@ -150,9 +153,9 @@ export const DEFAULT_ZOOM_VIA = "phone" as const;
 export interface Source { key: string; label: string }
 
 /** Every counted source of an automation: YouTube streams, then Zoom. */
-export function sourcesOf(cfg: Pick<Automation, "youtube" | "zoom">): Source[] {
-  const out: Source[] = cfg.youtube.map((y) => ({ key: y.key, label: y.label || y.key }));
-  if (cfg.zoom?.enabled) out.push({ key: cfg.zoom.key || "zoom", label: cfg.zoom.label || "Zoom" });
+export function sourcesOf(cfg: Pick<Automation, "youtube" | "zoom">): (Source & { yt: boolean })[] {
+  const out = cfg.youtube.map((y) => ({ key: y.key, label: y.label || y.key, yt: true }));
+  if (cfg.zoom?.enabled) out.push({ key: cfg.zoom.key || "zoom", label: cfg.zoom.label || "Zoom", yt: false });
   return out;
 }
 
@@ -197,13 +200,15 @@ function sum(vals: (number | null | undefined)[]): number | null {
  * Values.kt in the phone app.
  *  {yt1} {zoom} … highest count of each source
  *  {total}         sum of all sources' highest counts
+ *  {youtube}       sum of all YouTube streams (no Zoom)
+ *  {day}           date like "18 Nov 2026"
  *  {<group>}       sum of a custom total
  *  {<moment>.yt1}, {<moment>.total}, {<moment>.<group>}, {<moment>.time}  the same, within a moment
  *  {moments}       one line per moment with every source and the total
  */
 export function buildValues(
   cfg: Pick<Automation, "youtube" | "zoom" | "totals">,
-  base: { name: string; date: string },
+  base: { name: string; date: string; day?: string },
   peaks: Record<string, { peak: number | null } | undefined>,
   moments: MomentWindow[] = [],
   momentPeaks: Record<string, Record<string, { peak: number | null } | undefined>> = {},
@@ -211,10 +216,11 @@ export function buildValues(
   const NA = "NA";
   const srcs = sourcesOf(cfg);
   const groups = (cfg.totals ?? []).filter((g) => g.key);
-  const v: Record<string, string | number> = { name: base.name, date: base.date };
+  const v: Record<string, string | number> = { name: base.name, date: base.date, day: base.day ?? base.date };
   const fill = (prefix: string, get: (k: string) => number | null | undefined) => {
     for (const s of srcs) v[prefix + s.key] = get(s.key) ?? NA;
     v[prefix + "total"] = sum(srcs.map((s) => get(s.key))) ?? NA;
+    v[prefix + "youtube"] = sum(srcs.filter((s) => s.yt).map((s) => get(s.key))) ?? NA;
     for (const g of groups) v[prefix + g.key] = sum(g.sources.map((k) => get(k))) ?? NA;
   };
   fill("", (k) => peaks[k]?.peak);
@@ -233,8 +239,27 @@ export function buildValues(
 
 /** Values for a run, from what has been counted so far. */
 export function runValues(run: Run): Record<string, string | number> {
-  const date = run.startAt.toDate().toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" }).replace(/\//g, "-");
-  return buildValues(run.config, { name: run.automationName, date }, run.peaks ?? {}, momentsOf(run), run.momentPeaks ?? {});
+  const start = run.startAt.toDate();
+  return buildValues(run.config, { name: run.automationName, date: fmtDate(start), day: fmtDay(start) }, run.peaks ?? {}, momentsOf(run), run.momentPeaks ?? {});
+}
+
+export const fmtDate = (d: Date) => d.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" }).replace(/\//g, "-");
+/** "18 Nov 2026" */
+export const fmtDay = (d: Date) =>
+  d.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" }).replace("Sept", "Sep");
+
+/**
+ * The Satsang report layout: the moment total, each stream on its own line, then
+ * YouTube + Zoom = total. Built from the automation's own streams and first moment.
+ */
+export function satsangTemplate(a: Pick<Automation, "youtube" | "zoom" | "moments">): string {
+  const m = a.moments?.[0];
+  const lines = ["{name}: {day}", ""];
+  if (m) lines.push(`${m.label || m.key} : {${m.key}.youtube}`, "");
+  for (const y of a.youtube) lines.push(`${y.label || y.key} : {${y.key}}`);
+  lines.push("");
+  lines.push(a.zoom?.enabled ? `કથા : {youtube} + Zoom : {${a.zoom.key || "zoom"}} = {total}` : "કથા : {youtube}");
+  return lines.join("\n");
 }
 
 export const TEMPLATE_HELP =
