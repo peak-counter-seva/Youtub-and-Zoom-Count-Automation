@@ -49,12 +49,26 @@ class Tracker:
         self.peaks: dict[str, tuple[int, datetime]] = {}
         self.saved: dict[str, dict] = {}
         self.last_save: float | None = None
+        self.moments: list[tuple[str, datetime, datetime, str]] = []  # key, start, end, label
+        self.mpeaks: dict[tuple[str, str], tuple[int, datetime]] = {}  # (moment, source) -> highest
+        self.mpeaks_saved: dict[tuple[str, str], int] = {}
 
     def update(self, key: str, reading: dict, t: datetime):
         self.readings[key] = reading
         v = reading["value"]
-        if v is not None and (key not in self.peaks or v > self.peaks[key][0]):
+        if v is None:
+            return
+        if key not in self.peaks or v > self.peaks[key][0]:
             self.peaks[key] = (v, t)
+        for mk, ms, me, _ in self.moments:
+            if ms <= t < me and ((mk, key) not in self.mpeaks or v > self.mpeaks[(mk, key)][0]):
+                self.mpeaks[(mk, key)] = (v, t)
+
+    def moment_payload(self) -> dict[str, dict[str, dict]]:
+        out: dict[str, dict[str, dict]] = {}
+        for (mk, key), (v, t) in self.mpeaks.items():
+            out.setdefault(mk, {})[key] = {"peak": v, "peakAt": t}
+        return out
 
     def due(self, mono: float) -> bool:
         if not self.readings:
@@ -73,6 +87,9 @@ class Tracker:
             best = self.peaks.get(key)
             if best and (s["peak"] is None or best[0] - s["peak"] >= self.step):
                 return True
+        # A moment's highest count rose: save soon so the website shows it.
+        if mono - self.last_save >= 10 and any(self.mpeaks_saved.get(k) != v for k, (v, _) in self.mpeaks.items()):
+            return True
         return False
 
     def payload(self) -> dict[str, dict]:
@@ -88,6 +105,7 @@ class Tracker:
         for key, r in self.readings.items():
             best = self.peaks.get(key)
             self.saved[key] = {"value": r["value"], "note": r.get("note", ""), "peak": best[0] if best else None}
+        self.mpeaks_saved = {k: v for k, (v, _) in self.mpeaks.items()}
 
 
 def init_db():
@@ -98,7 +116,7 @@ def init_db():
 
 
 def render(template: str, values: dict) -> str:
-    return re.sub(r"\{(\w+)\}", lambda m: str(values[m.group(1)]) if values.get(m.group(1)) is not None else m.group(0), template)
+    return re.sub(r"\{([\w.]+)\}", lambda m: str(values[m.group(1)]) if values.get(m.group(1)) is not None else m.group(0), template)
 
 
 class Run:
@@ -118,7 +136,7 @@ class Run:
         stamp = datetime.now(IST).strftime("%H:%M:%S")
         self.ref.update({"log": firestore.ArrayUnion([f"{stamp} {msg}"])})
 
-    def merge_peaks(self, readings: dict[str, dict], status: str | None = None) -> dict:
+    def merge_peaks(self, readings: dict[str, dict], status: str | None = None, moments: dict | None = None) -> dict:
         """Write current values and raise peaks only upward (the phone backup may also write)."""
         @firestore.transactional
         def tx(transaction):
@@ -144,6 +162,15 @@ class Run:
                     p["peakAt"] = r.get("peakAt") or ts
                 peaks[key] = p
             upd = {"peaks": peaks, "heartbeatAt": ts, "engine": ENGINE}
+            if moments:
+                mp = data.get("momentPeaks") or {}
+                for mk, per in moments.items():
+                    cur = mp.setdefault(mk, {})
+                    for key, r in per.items():
+                        old = (cur.get(key) or {}).get("peak")
+                        if old is None or r["peak"] > old:
+                            cur[key] = r
+                upd["momentPeaks"] = mp
             if status:
                 upd["status"] = status
             transaction.update(self.ref, upd)
@@ -188,7 +215,7 @@ async def main(run_id: str):
 
     zcfg = cfg.get("zoom") or {}
     zoom = None
-    zoom_via = zcfg.get("via") or "both"  # "both", "phone" or "github"
+    zoom_via = zcfg.get("via") or "phone"  # "phone" (default), "both" or "github"
     if zcfg.get("enabled") and zcfg.get("link") and zoom_via != "phone":
         from zoom import ZoomCounter
         try:
@@ -213,8 +240,12 @@ async def main(run_id: str):
     last_zoom_status = None
     last_error = None
     tracker = Tracker(cfg.get("saveStep") or DEFAULT_SAVE_STEP)
-    tick = ZOOM_EVERY if zoom else poll
-    next_yt = next_zoom = 0.0
+    tracker.moments = moment_windows(data)
+    # Each stream can have its own check interval; streams due together share one API call.
+    polls = {s["key"]: max(10, int(s.get("pollSeconds") or poll)) for s in sources}
+    next_yt = {s["key"]: 0.0 for s in sources}
+    tick = min(([ZOOM_EVERY] if zoom else []) + list(polls.values()) or [poll])
+    next_zoom = 0.0
     last_stop_check = time.monotonic()
     try:
         while True:
@@ -228,9 +259,11 @@ async def main(run_id: str):
                     return
             mono = time.monotonic()
             try:
-                if sources and mono >= next_yt:
-                    next_yt = mono + poll  # set first so a failing read retries after `poll`, not every tick
-                    for key, r in read_youtube(yt, sources, windows, t).items():
+                due_now = [s for s in sources if mono >= next_yt[s["key"]] - 0.5]
+                for s in due_now:  # set first so a failing read retries after its interval, not every tick
+                    next_yt[s["key"]] = mono + polls[s["key"]]
+                if due_now:
+                    for key, r in read_youtube(yt, due_now, windows, t).items():
                         tracker.update(key, r, t)
                 if zoom and mono >= next_zoom:
                     zn = await read_zoom(zoom)
@@ -249,12 +282,15 @@ async def main(run_id: str):
 
             stop = False
             if tracker.due(mono):
-                data = run.merge_peaks(tracker.payload(), status="running")
+                data = run.merge_peaks(tracker.payload(), status="running", moments=tracker.moment_payload())
                 tracker.mark_saved(mono)
                 last_stop_check = mono
                 stop = bool(data.get("stopRequested"))
+                tracker.moments = moment_windows(data)  # picks up moments marked from the website
             elif mono - last_stop_check >= STOP_CHECK_EVERY:
-                stop = bool((run.ref.get().to_dict() or {}).get("stopRequested"))
+                fresh = run.ref.get().to_dict() or {}
+                stop = bool(fresh.get("stopRequested"))
+                tracker.moments = moment_windows(fresh) or tracker.moments
                 last_stop_check = mono
             if stop:
                 stopped = True
@@ -264,7 +300,7 @@ async def main(run_id: str):
     finally:
         if tracker.readings:
             try:  # save the exact final values and peaks before the SMS is written
-                run.merge_peaks(tracker.payload())
+                run.merge_peaks(tracker.payload(), moments=tracker.moment_payload())
             except Exception:  # noqa: BLE001
                 log.exception("final save failed")
         if zoom:
@@ -273,6 +309,67 @@ async def main(run_id: str):
             if zcfg.get("enabled") and zoom_via != "github" and not stopped:
                 await asyncio.sleep(30)  # let the sender phone save its last Zoom peak
             finish(db, run, stopped)
+
+
+def moment_windows(data: dict) -> list[tuple[str, datetime, datetime, str]]:
+    """Moments of a run: fixed ones from the automation (e.g. Aarti 06:00 for 30 min) and ones marked live."""
+    if not data.get("startAt"):
+        return []
+    start_at: datetime = data["startAt"]
+    out = []
+    for m in (data.get("config") or {}).get("moments") or []:
+        if not m.get("key") or not m.get("at"):
+            continue
+        d = start_at.astimezone(IST).date()
+        hh, mm = map(int, m["at"].split(":"))
+        ms = datetime(d.year, d.month, d.day, hh, mm, tzinfo=IST)
+        me = ms + timedelta(minutes=max(1, int(m.get("minutes") or 30)))
+        if me <= start_at:
+            ms, me = ms + timedelta(days=1), me + timedelta(days=1)
+        out.append((m["key"], ms, me, m.get("label") or m["key"]))
+    for m in data.get("extraMoments") or []:
+        if m.get("key") and m.get("startAt") and m.get("endAt"):
+            out.append((m["key"], m["startAt"], m["endAt"], m.get("label") or m["key"]))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def build_values(data: dict) -> dict:
+    """Every SMS value. Keep in step with buildValues in web/src/lib/types.ts and Values.kt."""
+    cfg = data["config"]
+    srcs = [(y["key"], y.get("label") or y["key"]) for y in cfg.get("youtube", [])]
+    z = cfg.get("zoom") or {}
+    if z.get("enabled"):
+        srcs.append((z.get("key") or "zoom", z.get("label") or "Zoom"))
+    groups = [g for g in cfg.get("totals") or [] if g.get("key")]
+    v: dict = {"name": data.get("automationName", ""), "date": fmt_date(data["startAt"])}
+
+    def total(vals):
+        nums = [x for x in vals if isinstance(x, (int, float))]
+        return sum(nums) if nums else "NA"
+
+    def fill(prefix, get):
+        for k, _ in srcs:
+            v[prefix + k] = get(k) if get(k) is not None else "NA"
+        v[prefix + "total"] = total([get(k) for k, _ in srcs])
+        for g in groups:
+            v[prefix + g["key"]] = total([get(k) for k in g.get("sources", [])])
+
+    peaks = data.get("peaks") or {}
+    fill("", lambda k: (peaks.get(k) or {}).get("peak"))
+    mpeaks = data.get("momentPeaks") or {}
+    lines = []
+    for mk, ms, _me, label in moment_windows(data):
+        mp = mpeaks.get(mk) or {}
+        fill(mk + ".", lambda k, mp=mp: (mp.get(k) or {}).get("peak"))
+        at = ms.astimezone(IST).strftime("%H:%M")
+        v[mk + ".time"] = at
+        parts = [f"{lab} {v[mk + '.' + k]}" for k, lab in srcs]
+        if len(srcs) > 1:
+            parts.append(f"Total {v[mk + '.total']}")
+        lines.append(f"{label} {at}: {', '.join(parts)}")
+    v["moments"] = "\n".join(lines)
+    return v
 
 
 def read_youtube(yt, sources, windows, t) -> dict[str, dict]:
@@ -309,11 +406,7 @@ async def read_zoom(zoom) -> int | None:
 def finish(db, run: Run, stopped: bool):
     data = run.get()
     cfg = data["config"]
-    peaks = data.get("peaks") or {}
-    values = {"name": data.get("automationName", ""), "date": fmt_date(data["startAt"])}
-    for k, p in peaks.items():
-        values[k] = p.get("peak") if p.get("peak") is not None else "NA"
-    text = render(cfg["sms"]["template"], values)
+    text = render(cfg["sms"]["template"], build_values(data))
     batch = db.batch()
     batch.update(run.ref, {"status": "stopped" if stopped else "finished", "smsText": text, "smsStatus": "pending",
                            "finishedAt": now(), "heartbeatAt": now()})

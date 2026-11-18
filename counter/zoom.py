@@ -24,7 +24,12 @@ def parse_link(link: str, passcode: str | None) -> tuple[str, str | None]:
     if not m:
         raise ValueError("Could not find the meeting number in the Zoom link")
     pwd = parse_qs(u.query).get("pwd", [None])[0]
-    return m.group(1), pwd or (passcode or None)
+    return m.group(1), pwd
+
+
+def passcode_for(link_pwd: str | None, passcode: str | None) -> str | None:
+    """The typed passcode wins (it changes weekly while the link stays the same)."""
+    return (passcode or "").strip() or link_pwd
 
 
 async def _first_visible(page: Page, selectors: list[str], timeout_ms: int = 1500):
@@ -54,7 +59,8 @@ COUNT_JS = r"""
 
 class ZoomCounter:
     def __init__(self, link: str, passcode: str | None, name: str):
-        self.meeting_id, self.pwd = parse_link(link, passcode)
+        self.meeting_id, self.url_pwd = parse_link(link, passcode)
+        self.pwd = passcode_for(self.url_pwd, passcode)
         self.name = name or "Count"
         self._pw = None
         self.browser: Browser | None = None
@@ -86,8 +92,8 @@ class ZoomCounter:
     async def join(self) -> bool:
         assert self.page
         url = f"https://app.zoom.us/wc/join/{self.meeting_id}"
-        if self.pwd:
-            url += f"?pwd={self.pwd}"
+        if self.url_pwd:
+            url += f"?pwd={self.url_pwd}"
         log.info("opening web client for meeting %s", self.meeting_id)
         await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
         for step in range(40):  # up to ~4 minutes of clicking through join screens

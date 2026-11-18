@@ -32,7 +32,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class ZoomWatcher(
     private val service: Context,
-    val runId: String,
+    /** Meeting number: one watcher per meeting, shared by every run that counts it. */
+    val id: String,
     val title: String,
     link: String,
     passcode: String?,
@@ -43,7 +44,8 @@ class ZoomWatcher(
     private val main = Handler(Looper.getMainLooper())
     private val wrapper = MutableContextWrapper(service)
     private val meetingId: String
-    private val pwd: String?
+    private val urlPwd: String?   // the encoded ?pwd= from the link, if any
+    private val pwd: String?      // what to type into the passcode box
     private var webView: WebView? = null
     private var inOverlay = false
     private var shownInActivity = false
@@ -57,18 +59,19 @@ class ZoomWatcher(
     init {
         val parsed = parseLink(link, passcode)
         meetingId = parsed.first
-        pwd = parsed.second
+        urlPwd = parsed.second
+        pwd = passcode?.trim()?.ifBlank { null } ?: urlPwd
     }
 
     fun start() {
-        active[runId] = this
+        active[id] = this
         create()
         main.postDelayed(::tick, TICK_MS)
     }
 
     fun stop() {
         stopped = true
-        active.remove(runId)
+        active.remove(id)
         main.removeCallbacksAndMessages(null)
         webView?.let { wv ->
             try { wv.evaluateJavascript(LEAVE_JS, null) } catch (_: Exception) {}
@@ -131,9 +134,14 @@ class ZoomWatcher(
     }
 
     private fun load() {
+        val first = lastLoad == 0L
         lastLoad = System.currentTimeMillis()
-        val url = "https://app.zoom.us/wc/join/$meetingId" + (pwd?.let { "?pwd=" + Uri.encode(it) } ?: "")
-        webView?.loadUrl(url)
+        val url = "https://app.zoom.us/wc/join/$meetingId" + (urlPwd?.let { "?pwd=" + Uri.encode(it) } ?: "")
+        val wv = webView ?: return
+        if (first) { wv.loadUrl(url); return }
+        // Leave properly first, so Zoom doesn't keep a second copy of this name in the meeting.
+        try { wv.evaluateJavascript(LEAVE_JS, null) } catch (_: Exception) {}
+        main.postDelayed({ if (!stopped) webView?.loadUrl(url) }, 3000)
     }
 
     private fun attachOverlay() {
@@ -180,10 +188,12 @@ class ZoomWatcher(
                 // Page still loading.
             }
             val now = System.currentTimeMillis()
-            if (raw != null) notJoinedSince = now
-            // Stuck or meeting over: start again from the join page now and then.
+            // Never reload while inside the meeting, even if the count can't be read for a moment.
+            if (raw != null || st == "in_meeting") notJoinedSince = now
+            // Stuck on the join screens or meeting over: start again from the join page now and then.
             val stuckMs = if (st == "ended") 60_000L else 6 * 60_000L
-            if (raw == null && st != "captcha" && st != "waiting_room" && now - notJoinedSince > stuckMs && now - lastLoad > stuckMs) {
+            val canReload = st != "captcha" && st != "waiting_room" && st != "in_meeting"
+            if (raw == null && canReload && now - notJoinedSince > stuckMs && now - lastLoad > stuckMs) {
                 load()
             }
             state = st
@@ -196,7 +206,7 @@ class ZoomWatcher(
     companion object {
         private const val TAG = "ZoomWatcher"
         const val TICK_MS = 3000L
-        /** Watchers by run id, so the screen can show one. */
+        /** Watchers by meeting number, so the screen can show one. */
         val active = ConcurrentHashMap<String, ZoomWatcher>()
 
         const val DESKTOP_UA =
@@ -208,11 +218,12 @@ class ZoomWatcher(
                 ?: Regex("(\\d{9,12})").find(clean.replace(" ", ""))?.groupValues?.get(1)
                 ?: throw IllegalArgumentException("Could not find the meeting number in the Zoom link")
             val pwd = try { Uri.parse(clean).getQueryParameter("pwd") } catch (_: Exception) { null }
-            return id to (pwd ?: passcode?.takeIf { it.isNotBlank() })
+            return id to pwd?.ifBlank { null }
         }
 
         fun stateText(state: String, count: Int?): String = when {
             count != null -> "In the meeting · $count participants"
+            state == "in_meeting" -> "In the meeting · reading the count…"
             state == "captcha" -> "Zoom wants a robot check. Tap to finish it."
             state == "waiting_room" -> "In the waiting room"
             state == "waiting_host" -> "Waiting for the host to start"
@@ -265,6 +276,9 @@ function(name, pwd) {
     var later = button(/^continue without audio$/i); if (later) later.click();
     return { count: Math.max.apply(null, nums), state: 'joined' };
   }
+  // Inside the meeting but the count isn't readable right now: don't click or reload anything.
+  if (first(['#wc-footer', '.footer__inner', '[class*="footer-button-base"]', 'button[aria-label^="leave" i]']))
+    return { count: null, state: 'in_meeting' };
 
   var text = docs.map(function (d) { return (d.body && d.body.innerText) || ''; }).join(' ').toLowerCase();
   if (/captcha|not a robot|verify you are human|security check/.test(text) || all('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha').length)

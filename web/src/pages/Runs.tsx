@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { resendSms, setManualPeak, stopRun } from "../lib/api";
+import { useEffect, useState, type ReactNode } from "react";
+import { markMoment, resendSms, sendNow, setManualPeak, stopRun } from "../lib/api";
 import { auth } from "../lib/firebase";
 import { useCollection } from "../lib/hooks";
 import { fmtDayIST, fmtTimeIST } from "../lib/time";
-import type { Peak, Run } from "../lib/types";
+import { momentsOf, renderTemplate, runValues, sourcesOf, type Peak, type Run } from "../lib/types";
 import { Empty, Icon, Notice, useUi } from "../components/ui";
 
 const STATUS_TEXT: Record<Run["status"], string> = {
@@ -61,6 +61,9 @@ function RunCard({ r }: { r: Run }) {
   const start = r.startAt?.toDate();
   const end = r.endAt?.toDate();
   const peaks = Object.entries(r.peaks ?? {});
+  const [sheet, setSheet] = useState<"moment" | "send" | null>(null);
+  const values = runValues(r);
+  const showTotal = peaks.length > 1 && values.total !== "NA";
 
   async function stop() {
     const ok = await confirm({ title: "Stop this run now?", body: "Counting stops and the SMS is sent with the highest numbers so far.", confirm: "Stop and send", danger: true });
@@ -91,8 +94,17 @@ function RunCard({ r }: { r: Run }) {
       {peaks.length > 0 && (
         <div className="stats">
           {peaks.map(([k, p]) => <StatTile key={k} r={r} k={k} p={p} active={active} />)}
+          {showTotal && (
+            <div className="stat">
+              <div className="stat-label"><Icon name="plus" size={14} /><span>Total</span></div>
+              <div className="stat-value">{fmtN(Number(values.total))}</div>
+              <div className="stat-sub">all highest counts added</div>
+            </div>
+          )}
         </div>
       )}
+
+      <Moments r={r} />
 
       {r.smsText && (
         <div className="sms-out">
@@ -102,6 +114,8 @@ function RunCard({ r }: { r: Run }) {
       )}
 
       {r.error && <Notice tone="error">{r.error}</Notice>}
+      {sheet === "moment" && <MarkMomentSheet r={r} onClose={() => setSheet(null)} />}
+      {sheet === "send" && <SendNowSheet r={r} onClose={() => setSheet(null)} />}
 
       {(active || r.smsText || (r.log && r.log.length > 0)) && (
         <div className="run-foot">
@@ -112,7 +126,13 @@ function RunCard({ r }: { r: Run }) {
             </details>
           ) : <span />}
           <div className="btn-row" style={{ alignSelf: "flex-start" }}>
-            {active && !r.stopRequested && <button className="btn btn-danger btn-sm" onClick={stop}><Icon name="stop" size={12} /> Stop now</button>}
+            {active && !r.stopRequested && (
+              <>
+                <button className="btn btn-sm" onClick={() => setSheet("moment")}><Icon name="clock" size={14} /> Mark moment</button>
+                <button className="btn btn-sm" onClick={() => setSheet("send")}><Icon name="send" size={14} /> Send SMS now</button>
+                <button className="btn btn-danger btn-sm" onClick={stop}><Icon name="stop" size={12} /> Stop now</button>
+              </>
+            )}
             {active && r.stopRequested && <span className="muted small">Stopping…</span>}
             {!active && r.smsText && <button className="btn btn-sm" onClick={resend}><Icon name="send" size={14} /> Resend SMS</button>}
           </div>
@@ -176,5 +196,126 @@ function StatTile({ r, k, p, active }: { r: Run; k: string; p: Peak; active: boo
         </>
       )}
     </div>
+  );
+}
+
+function Moments({ r }: { r: Run }) {
+  const moments = momentsOf(r);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => tick((n) => n + 1), 30000);
+    return () => window.clearInterval(t);
+  }, []);
+  if (moments.length === 0) return null;
+  const srcs = sourcesOf(r.config);
+  const v = runValues(r);
+  const now = Date.now();
+  return (
+    <div className="moments">
+      {moments.map((m) => {
+        const live = now >= m.start.getTime() && now < m.end.getTime();
+        const upcoming = now < m.start.getTime();
+        return (
+          <div className="moment" key={m.key}>
+            <div className="moment-head">
+              <b>{m.label}</b>
+              <span>
+                {live ? <span className="moment-live">Watching now · </span> : null}
+                {fmtTimeIST(m.start)} – {fmtTimeIST(m.end)}
+              </span>
+            </div>
+            {upcoming ? (
+              <div className="moment-vals"><span className="muted">Not started yet</span></div>
+            ) : (
+              <div className="moment-vals">
+                {srcs.map((src) => <span key={src.key}>{src.label} <b>{fmtV(v[`${m.key}.${src.key}`])}</b></span>)}
+                {srcs.length > 1 && <span>Total <b>{fmtV(v[`${m.key}.total`])}</b></span>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const fmtV = (x: string | number | undefined) => (typeof x === "number" ? fmtN(x) : "–");
+
+function Sheet({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="dialog" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+        <h2>{title}</h2>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function MarkMomentSheet({ r, onClose }: { r: Run; onClose: () => void }) {
+  const { toast } = useUi();
+  const [label, setLabel] = useState("");
+  const [minutes, setMinutes] = useState(30);
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    setBusy(true);
+    try {
+      await markMoment(r, label, minutes, auth.currentUser?.email ?? "someone");
+      toast("Noting the highest counts from now");
+      onClose();
+    } catch (e) {
+      toast((e as Error).message);
+      setBusy(false);
+    }
+  }
+  return (
+    <Sheet title="Mark a moment" onClose={onClose}>
+      <p>Notes the highest count in every stream and Zoom from now on. It shows on this run and in the {"{moments}"} part of the SMS.</p>
+      <label className="field"><span>Name</span>
+        <input className="input" autoFocus value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Aarti" onKeyDown={(e) => e.key === "Enter" && go()} />
+      </label>
+      <label className="field"><span>Watch for</span>
+        <select className="input" value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
+          {[10, 15, 20, 30, 45, 60, 90, 120].map((n) => <option key={n} value={n}>{n} minutes</option>)}
+        </select>
+      </label>
+      <div className="btn-row">
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn btn-primary" disabled={busy} onClick={go}>Start noting</button>
+      </div>
+    </Sheet>
+  );
+}
+
+function SendNowSheet({ r, onClose }: { r: Run; onClose: () => void }) {
+  const { toast } = useUi();
+  const [text, setText] = useState(() => renderTemplate(r.config.sms.template, runValues(r)));
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      await sendNow(r, text.trim(), auth.currentUser?.email ?? "someone");
+      toast("SMS queued. Counting carries on.");
+      onClose();
+    } catch (e) {
+      toast((e as Error).message);
+      setBusy(false);
+    }
+  }
+  return (
+    <Sheet title="Send SMS now" onClose={onClose}>
+      <p>Goes to {r.config.sms.to} from the sender phone, with the counts so far. You can change the text. Counting carries on and the usual SMS is still sent at the end.</p>
+      <textarea className="input" rows={5} value={text} onChange={(e) => setText(e.target.value)} />
+      <div className="btn-row">
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn btn-primary" disabled={busy || !text.trim()} onClick={go}><Icon name="send" size={14} /> Send</button>
+      </div>
+    </Sheet>
   );
 }

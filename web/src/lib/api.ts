@@ -3,11 +3,16 @@ import {
   Timestamp, updateDoc, arrayUnion,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { renderTemplate, type Automation, type Run } from "./types";
+import { renderTemplate, runValues, type Automation, type Run } from "./types";
 import { computeWindow } from "./time";
 
-export async function saveAutomation(a: Automation, email: string) {
+export async function saveAutomation(a: Automation, email: string, before?: Automation) {
   const { id, ...data } = a;
+  // Remember when the Zoom passcode was set, for the weekly reminder.
+  const z = before?.zoom;
+  if (!z || z.passcode !== a.zoom.passcode || z.passcodeDay !== a.zoom.passcodeDay || !a.zoom.passcodeChangedAt)
+    data.zoom = { ...data.zoom, passcodeChangedAt: Timestamp.now() };
+  if (data.zoom.passcodeDay === undefined) delete data.zoom.passcodeDay;
   const payload = { ...data, createdBy: data.createdBy || email, updatedAt: serverTimestamp() };
   if (id) {
     await setDoc(doc(db, "automations", id), payload);
@@ -82,23 +87,50 @@ export async function resendSms(run: Run) {
   });
 }
 
+const clock = () => new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata" });
+
 /** Type in a peak by hand (e.g. Zoom blocked the counter). Re-writes the SMS text if the run already finished. */
 export async function setManualPeak(run: Run, key: string, value: number, email: string) {
+  const label = run.peaks?.[key]?.label ?? key;
   const upd: Record<string, unknown> = {
     [`peaks.${key}.peak`]: value,
     [`peaks.${key}.peakAt`]: serverTimestamp(),
     [`peaks.${key}.manualBy`]: email,
-    [`peaks.${key}.label`]: run.peaks?.[key]?.label ?? key,
-    log: arrayUnion(`${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata" })} ${email} set ${key} = ${value} by hand`),
+    [`peaks.${key}.label`]: label,
+    log: arrayUnion(`${clock()} ${email} set ${key} = ${value} by hand`),
   };
   if (run.smsText) {
-    const values: Record<string, string | number> = {
-      name: run.automationName,
-      date: run.startAt.toDate().toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" }).replace(/\//g, "-"),
-    };
-    for (const [k, p] of Object.entries(run.peaks ?? {})) values[k] = p.peak ?? "NA";
-    values[key] = value;
-    upd.smsText = renderTemplate(run.config.sms.template, values);
+    const peaks = { ...run.peaks, [key]: { ...(run.peaks?.[key] ?? { label, current: null, peakAt: null, lastAt: null }), peak: value } };
+    upd.smsText = renderTemplate(run.config.sms.template, runValues({ ...run, peaks }));
   }
   await updateDoc(doc(db, "runs", run.id), upd);
+}
+
+/** Note the highest counts from now for the next `minutes` (e.g. Aarti). Shown on the run and in {moments}. */
+export async function markMoment(run: Run, label: string, minutes: number, email: string) {
+  const n = (run.extraMoments?.length ?? 0) + 1;
+  const start = new Date();
+  await updateDoc(doc(db, "runs", run.id), {
+    extraMoments: arrayUnion({
+      key: `mark${n}`,
+      label: label.trim() || `Moment ${n}`,
+      startAt: Timestamp.fromDate(start),
+      endAt: Timestamp.fromDate(new Date(start.getTime() + minutes * 60000)),
+      by: email,
+    }),
+    log: arrayUnion(`${clock()} ${email} marked “${label.trim() || `Moment ${n}`}” for ${minutes} min`),
+  });
+}
+
+/** Send an SMS now from the run's sender phone, while counting goes on. */
+export async function sendNow(run: Run, text: string, email: string) {
+  await addDoc(collection(db, "smsJobs"), {
+    deviceId: run.config.sms.senderDeviceId,
+    to: run.config.sms.to,
+    text,
+    status: "pending",
+    requestedBy: email,
+    createdAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, "runs", run.id), { log: arrayUnion(`${clock()} ${email} sent an SMS now: ${text}`) });
 }

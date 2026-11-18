@@ -50,22 +50,30 @@ class CounterService : Service() {
     private val activeRuns = mutableMapOf<String, DocumentSnapshot>()
     private var wakeLock: PowerManager.WakeLock? = null
 
-    /** Zoom counting sessions by run id. Touched only on the main thread. */
-    private val zoomSessions = mutableMapOf<String, ZoomSession>()
+    /** Zoom meetings being counted, by meeting number. Touched only on the main thread. */
+    private val zoomMeetings = mutableMapOf<String, ZoomMeeting>()
     private val zoomFailed = mutableSetOf<String>()
 
-    private class ZoomSession(val key: String, val label: String, val step: Int) {
+    private class ZoomMeeting(val id: String) {
         lateinit var watcher: ZoomWatcher
+        val runs = mutableMapOf<String, RunZoom>()
+        var captchaShown = false
+    }
+
+    /** One run's share of a meeting's count. */
+    private class RunZoom(val runId: String, val key: String, val label: String, val step: Int) {
+        lateinit var doc: DocumentSnapshot
         @Volatile var count: Int? = null
         @Volatile var state: String = "starting"
         @Volatile var localPeak: Int? = null
         @Volatile var localPeakAt: Timestamp? = null
+        val momentPeaks = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Timestamp>>()
+        val savedMoments = java.util.concurrent.ConcurrentHashMap<String, Int>()
         @Volatile var savedValue: Int? = null
         @Volatile var savedPeak: Int? = null
         @Volatile var savedState: String = ""
         @Volatile var lastSave = 0L
         @Volatile var saving = false
-        var captchaShown = false
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -97,8 +105,8 @@ class CounterService : Service() {
     }
 
     override fun onDestroy() {
-        zoomSessions.values.forEach { it.watcher.stop() }
-        zoomSessions.clear()
+        zoomMeetings.values.forEach { it.watcher.stop() }
+        zoomMeetings.clear()
         smsListener?.remove()
         runListener?.remove()
         scope.cancel()
@@ -125,6 +133,7 @@ class CounterService : Service() {
     }
 
     private suspend fun heartbeatLoop(uid: String, email: String) {
+        try { migrateDeviceId(uid) } catch (e: Exception) { Log.w(TAG, "device id move failed", e) }
         while (scope.isActive) {
             try {
                 db.collection("devices").document(prefs.deviceId).set(
@@ -132,6 +141,7 @@ class CounterService : Service() {
                         "ownerUid" to uid,
                         "ownerEmail" to email,
                         "label" to prefs.label.ifBlank { Build.MODEL },
+                        "model" to "${Build.MANUFACTURER} ${Build.MODEL}",
                         "lastSeen" to FieldValue.serverTimestamp(),
                         "appVersion" to BuildConfig.VERSION_NAME,
                     ),
@@ -140,8 +150,66 @@ class CounterService : Service() {
             } catch (e: Exception) {
                 Log.w(TAG, "heartbeat failed", e)
             }
+            try { passcodeReminders() } catch (e: Exception) { Log.w(TAG, "passcode check failed", e) }
             delay(5 * 60_000L)
         }
+    }
+
+    /**
+     * Older app versions gave the phone a random id that changed on every reinstall. Move
+     * automations, live runs and waiting SMS from that old id to this phone's lasting id.
+     * The old id is known if the app wasn't reinstalled; otherwise, if this account has exactly
+     * one phone from an older version, that is taken to be this phone.
+     */
+    private suspend fun migrateDeviceId(uid: String) {
+        val newId = prefs.deviceId
+        val mine = db.collection("devices").whereEqualTo("ownerUid", uid).get().await().documents
+        val old = prefs.oldDeviceId?.let { o -> mine.filter { it.id == o } }?.takeIf { it.isNotEmpty() }
+            ?: mine.filter { it.id != newId && it.getString("model") == null }.takeIf { it.size == 1 }
+            ?: return
+        for (od in old) {
+            if (od.id == newId) continue
+            if (prefs.label.isBlank()) od.getString("label")?.let { prefs.label = it }
+            val batch = db.batch()
+            db.collection("automations").whereEqualTo("sms.senderDeviceId", od.id).get().await()
+                .forEach { batch.update(it.reference, "sms.senderDeviceId", newId) }
+            db.collection("runs").whereEqualTo("config.sms.senderDeviceId", od.id).get().await()
+                .filter { it.getString("status") in ACTIVE }
+                .forEach { batch.update(it.reference, "config.sms.senderDeviceId", newId) }
+            db.collection("smsJobs").whereEqualTo("deviceId", od.id).whereEqualTo("status", "pending").get().await()
+                .forEach { batch.update(it.reference, "deviceId", newId) }
+            batch.delete(od.reference)
+            batch.commit().await()
+        }
+        prefs.oldDeviceId = null
+    }
+
+    /** Once a day, on and after the weekly passcode-change day, remind until the new passcode is saved. */
+    private suspend fun passcodeReminders() {
+        val hour = java.util.Calendar.getInstance(IST).get(java.util.Calendar.HOUR_OF_DAY)
+        if (hour < 7 || hour >= 22) return
+        val today = SimpleDateFormat("yyyyMMdd", Locale.US).apply { timeZone = IST }.format(java.util.Date())
+        val due = db.collection("automations").whereEqualTo("sms.senderDeviceId", prefs.deviceId).get().await()
+            .documents.filter { Values.passcodeDue(it) }
+        val done = prefs.passcodeNotified.split(",").filter { it.endsWith(":$today") }.toMutableSet()
+        for (a in due) {
+            val tag = "${a.id}:$today"
+            if (tag in done) continue
+            done += tag
+            val name = a.getString("name") ?: "your automation"
+            val n = NotificationCompat.Builder(this, App.ALERTS)
+                .setSmallIcon(R.drawable.ic_stat)
+                .setColor(0xFF0E6B55.toInt())
+                .setContentTitle("New Zoom passcode?")
+                .setContentText("Update the Zoom passcode for $name on the website.")
+                .setStyle(NotificationCompat.BigTextStyle().bigText("The host changes the Zoom passcode this week. Open the website, edit “$name” and save the new passcode."))
+                .setContentIntent(PendingIntent.getActivity(this, 3,
+                    Intent(Intent.ACTION_VIEW, android.net.Uri.parse(WEB_URL)), PendingIntent.FLAG_IMMUTABLE))
+                .setAutoCancel(true)
+                .build()
+            getSystemService(android.app.NotificationManager::class.java).notify(100 + (a.id.hashCode() and 0xffff), n)
+        }
+        prefs.passcodeNotified = done.joinToString(",")
     }
 
     // ---------- SMS sending ----------
@@ -246,6 +314,7 @@ class CounterService : Service() {
         val ids = sources.associate { (it["key"] as String) to YouTube.videoId(it["url"] as? String ?: "") }
         val values = YouTube.read(ids.values.filterNotNull(), apiKey)
         val readings = mutableMapOf<String, Pair<String, Long?>>()
+        val inMoments = Values.moments(d).filter { now.seconds in it.start until it.end }
         for (s in sources) {
             val key = s["key"] as String
             var v = ids[key]?.let { values[it] }
@@ -268,7 +337,11 @@ class CounterService : Service() {
                 }
                 peaks[key] = p
             }
-            tx.update(ref, mapOf("peaks" to peaks, "backupAt" to now, "engine" to "phone backup", "status" to "running"))
+            val add = readings.filterValues { it.second != null }
+                .mapValues { (_, pair) -> inMoments.associate { it.key to (pair.second!!.toInt() to now) } }
+            val upd = mutableMapOf<String, Any?>("peaks" to peaks, "backupAt" to now, "engine" to "phone backup", "status" to "running")
+            if (inMoments.isNotEmpty() && add.isNotEmpty()) upd["momentPeaks"] = mergeMoments(cur, add)
+            tx.update(ref, upd)
         }.await()
         updateNotification("Backup counting: ${d.getString("automationName")}")
     }
@@ -282,14 +355,7 @@ class CounterService : Service() {
             val cfg = d.get("config") as Map<String, Any?>
             @Suppress("UNCHECKED_CAST")
             val sms = cfg["sms"] as Map<String, Any?>
-            @Suppress("UNCHECKED_CAST")
-            val peaks = d.get("peaks") as? Map<String, Map<String, Any?>> ?: emptyMap()
-            val values = mutableMapOf(
-                "name" to (d.getString("automationName") ?: ""),
-                "date" to fmtDate(d.getTimestamp("startAt")!!),
-            )
-            peaks.forEach { (k, p) -> values[k] = (p["peak"] as? Number)?.toString() ?: "NA" }
-            val text = Regex("\\{(\\w+)\\}").replace(sms["template"] as String) { m -> values[m.groupValues[1]] ?: m.value }
+            val text = Values.render(sms["template"] as String, Values.build(d))
             tx.update(ref, mapOf(
                 "status" to if (stopped) "stopped" else "finished",
                 "smsText" to text, "smsStatus" to "pending", "finishedAt" to Timestamp.now(),
@@ -304,114 +370,158 @@ class CounterService : Service() {
 
     // ---------- Zoom counting on this phone ----------
 
+    /**
+     * One hidden Zoom browser per meeting, even when several runs count the same meeting, so the
+     * meeting shows this phone's name only once. Each reading is shared with every run.
+     */
     private suspend fun zoomLoop() {
         while (scope.isActive) {
             val runs = synchronized(activeRuns) { activeRuns.values.toList() }
             val nowS = Timestamp.now().seconds
-            val want = mutableMapOf<String, DocumentSnapshot>()
+            val want = mutableMapOf<String, MutableList<DocumentSnapshot>>() // meeting number -> runs
             for (d in runs) {
                 @Suppress("UNCHECKED_CAST")
                 val cfg = d.get("config") as? Map<String, Any?> ?: continue
                 @Suppress("UNCHECKED_CAST")
                 val z = cfg["zoom"] as? Map<String, Any?> ?: continue
                 if (z["enabled"] != true || z["via"] == "github") continue
-                if ((z["link"] as? String).isNullOrBlank()) continue
+                val link = (z["link"] as? String)?.ifBlank { null } ?: continue
                 val start = d.getTimestamp("startAt")?.seconds ?: continue
                 val end = d.getTimestamp("endAt")?.seconds ?: continue
                 if (d.getBoolean("stopRequested") == true) continue
                 // Join 2 minutes early; stay until just after the end so the last peak is saved
                 // before the GitHub counter writes the SMS (it waits 30 s for this).
-                if (nowS >= start - 120 && nowS < end + 15) want[d.id] = d
+                if (nowS < start - 120 || nowS >= end + 15) continue
+                val meeting = try { ZoomWatcher.parseLink(link, null).first } catch (e: IllegalArgumentException) {
+                    if (zoomFailed.add(d.id)) scope.launch { note(d.id, "Phone: ${e.message}") }
+                    continue
+                }
+                want.getOrPut(meeting) { mutableListOf() } += d
             }
             withContext(Dispatchers.Main) {
-                for (id in zoomSessions.keys.toList()) {
-                    if (id !in want) {
-                        val s = zoomSessions.remove(id) ?: continue
-                        s.watcher.stop()
+                for (mid in zoomMeetings.keys.toList()) {
+                    val m = zoomMeetings[mid] ?: continue
+                    val keep = want[mid]?.map { it.id }?.toSet() ?: emptySet()
+                    for (rid in m.runs.keys.toList()) {
+                        if (rid !in keep) {
+                            val r = m.runs.remove(rid) ?: continue
+                            scope.launch { saveZoom(r); note(rid, "Phone: stopped counting Zoom. Highest seen ${r.localPeak ?: "none"}.") }
+                        }
+                    }
+                    if (m.runs.isEmpty()) {
+                        zoomMeetings.remove(mid)
+                        m.watcher.stop()
                         cancelCaptcha()
-                        scope.launch { saveZoom(id, s); note(id, "Phone: left Zoom. Highest seen ${s.localPeak ?: "none"}.") }
                     }
                 }
-                for ((id, d) in want) if (id !in zoomSessions && id !in zoomFailed) startZoom(id, d)
+                for ((mid, docs) in want) {
+                    val m = zoomMeetings[mid] ?: startMeeting(mid, docs.first()) ?: continue
+                    for (d in docs) {
+                        val r = m.runs[d.id]
+                        if (r != null) { r.doc = d; continue }
+                        m.runs[d.id] = newRunZoom(d)
+                        if (m.runs.size > 1) scope.launch { note(d.id, "Phone: already in this Zoom meeting for another run, sharing that count.") }
+                        else scope.launch {
+                            note(d.id, if (android.provider.Settings.canDrawOverlays(this@CounterService)) "Phone: opening Zoom to count participants."
+                                       else "Phone: opening Zoom without 'Display over other apps' permission; counting may pause when the screen is off.")
+                        }
+                    }
+                }
             }
             delay(10_000L)
         }
     }
 
-    private fun startZoom(id: String, d: DocumentSnapshot) {
-        @Suppress("UNCHECKED_CAST")
+    @Suppress("UNCHECKED_CAST")
+    private fun newRunZoom(d: DocumentSnapshot): RunZoom {
         val cfg = d.get("config") as Map<String, Any?>
-        @Suppress("UNCHECKED_CAST")
         val z = cfg["zoom"] as Map<String, Any?>
-        val s = ZoomSession(
+        return RunZoom(
+            runId = d.id,
             key = (z["key"] as? String)?.ifBlank { null } ?: "zoom",
             label = (z["label"] as? String)?.ifBlank { null } ?: "Zoom",
             step = ((cfg["saveStep"] as? Number)?.toInt() ?: 5).coerceAtLeast(1),
-        )
-        try {
-            s.watcher = ZoomWatcher(
-                this, id, d.getString("automationName") ?: "Zoom",
-                z["link"] as String, z["passcode"] as? String,
-                (z["displayName"] as? String)?.ifBlank { null } ?: "Count",
-            ) { c, st -> onZoomReading(id, s, c, st) }
-        } catch (e: IllegalArgumentException) {
-            zoomFailed += id
-            scope.launch { note(id, "Phone: ${e.message}") }
-            return
-        }
-        zoomSessions[id] = s
-        s.watcher.start()
-        wakeLock?.acquire(15 * 60_000L)
-        updateNotification("Counting Zoom: ${s.watcher.title}")
-        scope.launch {
-            note(id, if (android.provider.Settings.canDrawOverlays(this@CounterService)) "Phone: opening Zoom to count participants."
-                     else "Phone: opening Zoom without 'Display over other apps' permission; counting may pause when the screen is off.")
-        }
+        ).also { it.doc = d }
     }
 
-    /** Main thread. Keeps the exact peak; saves only on real changes, new peaks, or once a minute. */
-    private fun onZoomReading(id: String, s: ZoomSession, count: Int?, state: String) {
-        val nowMs = System.currentTimeMillis()
-        s.count = count
-        s.state = state
-        if (count != null && (s.localPeak == null || count > s.localPeak!!)) {
-            s.localPeak = count
-            s.localPeakAt = Timestamp.now()
+    @Suppress("UNCHECKED_CAST")
+    private fun startMeeting(mid: String, d: DocumentSnapshot): ZoomMeeting? {
+        val z = (d.get("config") as Map<String, Any?>)["zoom"] as Map<String, Any?>
+        val m = ZoomMeeting(mid)
+        try {
+            m.watcher = ZoomWatcher(
+                this, mid, d.getString("automationName") ?: "Zoom",
+                z["link"] as String, z["passcode"] as? String,
+                (z["displayName"] as? String)?.ifBlank { null } ?: "Count",
+            ) { c, st -> onZoomReading(m, c, st) }
+        } catch (e: IllegalArgumentException) {
+            zoomFailed += d.id
+            scope.launch { note(d.id, "Phone: ${e.message}") }
+            return null
         }
-        if (state == "captcha" && !s.captchaShown) { s.captchaShown = true; notifyCaptcha(id, s.watcher.title) }
-        if (state != "captcha" && s.captchaShown) { s.captchaShown = false; cancelCaptcha() }
-        val sv = s.savedValue
-        val sp = s.savedPeak
-        val lp = s.localPeak
-        val due = s.lastSave == 0L || nowMs - s.lastSave >= 60_000L || state != s.savedState ||
-            (count == null) != (sv == null) ||
-            (count != null && sv != null && abs(count - sv) >= s.step) ||
-            (lp != null && (sp == null || lp > sp) && nowMs - s.lastSave >= 5_000L)
-        if (due && !s.saving) {
-            s.saving = true
-            s.lastSave = nowMs
-            scope.launch {
-                try { saveZoom(id, s) } finally { s.saving = false }
+        zoomMeetings[mid] = m
+        m.watcher.start()
+        wakeLock?.acquire(15 * 60_000L)
+        updateNotification("Counting Zoom: ${m.watcher.title}")
+        return m
+    }
+
+    /** Main thread. Keeps exact peaks (overall and per moment); saves only on real changes, new peaks, or once a minute. */
+    private fun onZoomReading(m: ZoomMeeting, count: Int?, state: String) {
+        if (state == "captcha" && !m.captchaShown) { m.captchaShown = true; notifyCaptcha(m.id, m.watcher.title) }
+        if (state != "captcha" && m.captchaShown) { m.captchaShown = false; cancelCaptcha() }
+        val nowMs = System.currentTimeMillis()
+        val nowTs = Timestamp.now()
+        var saved = false
+        for (r in m.runs.values) {
+            r.count = count
+            r.state = state
+            if (count != null) {
+                if (r.localPeak == null || count > r.localPeak!!) { r.localPeak = count; r.localPeakAt = nowTs }
+                for (mo in Values.moments(r.doc)) {
+                    if (nowTs.seconds in mo.start until mo.end) {
+                        val old = r.momentPeaks[mo.key]
+                        if (old == null || count > old.first) r.momentPeaks[mo.key] = count to nowTs
+                    }
+                }
             }
+            val sv = r.savedValue
+            val sp = r.savedPeak
+            val lp = r.localPeak
+            val momentsChanged = r.momentPeaks.any { (k, v) -> r.savedMoments[k] != v.first }
+            val due = r.lastSave == 0L || nowMs - r.lastSave >= 60_000L || state != r.savedState ||
+                (count == null) != (sv == null) ||
+                (count != null && sv != null && abs(count - sv) >= r.step) ||
+                (lp != null && (sp == null || lp > sp) && nowMs - r.lastSave >= 5_000L) ||
+                (momentsChanged && nowMs - r.lastSave >= 10_000L)
+            if (due && !r.saving) {
+                r.saving = true
+                r.lastSave = nowMs
+                scope.launch { try { saveZoom(r) } finally { r.saving = false } }
+                saved = true
+            }
+        }
+        if (saved) {
             wakeLock?.acquire(15 * 60_000L)
             updateNotification("Zoom: " + ZoomWatcher.stateText(state, count))
         }
     }
 
-    private suspend fun saveZoom(id: String, s: ZoomSession) {
-        val count = s.count
-        val state = s.state
-        val peak = s.localPeak
-        val peakAt = s.localPeakAt
-        val ref = db.collection("runs").document(id)
+    private suspend fun saveZoom(r: RunZoom) {
+        val count = r.count
+        val state = r.state
+        val peak = r.localPeak
+        val peakAt = r.localPeakAt
+        val moments = r.momentPeaks.toMap()
+        val ref = db.collection("runs").document(r.runId)
         val now = Timestamp.now()
         try {
             db.runTransaction { tx ->
                 val cur = tx.get(ref)
                 @Suppress("UNCHECKED_CAST")
                 val peaks = (cur.get("peaks") as? Map<String, Map<String, Any?>> ?: emptyMap()).toMutableMap()
-                val p = (peaks[s.key] ?: emptyMap()).toMutableMap()
-                p["label"] = s.label
+                val p = (peaks[r.key] ?: emptyMap()).toMutableMap()
+                p["label"] = r.label
                 val last = p["lastAt"] as? Timestamp
                 val fresh = last != null && now.seconds - last.seconds < 30
                 if (count != null || !fresh) {
@@ -424,16 +534,32 @@ class CounterService : Service() {
                     p["peak"] = peak
                     p["peakAt"] = peakAt ?: now
                 }
-                peaks[s.key] = p
-                tx.update(ref, mapOf("peaks" to peaks, "zoomPhoneAt" to now))
+                peaks[r.key] = p
+                val upd = mutableMapOf<String, Any?>("peaks" to peaks, "zoomPhoneAt" to now)
+                if (moments.isNotEmpty()) upd["momentPeaks"] = mergeMoments(cur, mapOf(r.key to moments))
+                tx.update(ref, upd)
                 null
             }.await()
-            s.savedValue = count
-            if (peak != null) s.savedPeak = peak
-            s.savedState = state
+            r.savedValue = count
+            if (peak != null) r.savedPeak = peak
+            r.savedState = state
+            moments.forEach { (k, v) -> r.savedMoments[k] = v.first }
         } catch (e: Exception) {
             Log.w(TAG, "zoom save failed", e)
         }
+    }
+
+    /** Raise moment peaks only upward. [add] is source key -> moment key -> (value, time). */
+    private fun mergeMoments(cur: DocumentSnapshot, add: Map<String, Map<String, Pair<Int, Timestamp>>>): Map<String, Any?> {
+        @Suppress("UNCHECKED_CAST")
+        val mp = (cur.get("momentPeaks") as? Map<String, Map<String, Map<String, Any?>>> ?: emptyMap())
+            .mapValues { it.value.toMutableMap() }.toMutableMap()
+        for ((src, per) in add) for ((mk, v) in per) {
+            val m = mp.getOrPut(mk) { mutableMapOf() }
+            val old = (m[src]?.get("peak") as? Number)?.toLong()
+            if (old == null || v.first.toLong() > old) m[src] = mapOf("peak" to v.first, "peakAt" to v.second)
+        }
+        return mp
     }
 
     private suspend fun note(id: String, msg: String) {
@@ -479,13 +605,13 @@ class CounterService : Service() {
     private fun hhmm(v: String): Long = v.split(":").let { it[0].toLong() * 3600 + it[1].toLong() * 60 }
     private fun secs(a: Timestamp, b: Timestamp) = b.seconds - a.seconds
     private fun clock() = SimpleDateFormat("HH:mm:ss", Locale.US).apply { timeZone = IST }.format(java.util.Date())
-    private fun fmtDate(t: Timestamp) = SimpleDateFormat("dd-MM-yyyy", Locale.US).apply { timeZone = IST }.format(t.toDate())
 
     companion object {
         private const val TAG = "PeakCounter"
         private const val IST_OFFSET = 19800L
         private val IST: TimeZone = TimeZone.getTimeZone("Asia/Kolkata")
         private val ACTIVE = setOf("queued", "waiting", "running")
+        private const val WEB_URL = "https://youtub-and-zoom-count.web.app"
 
         fun start(ctx: Context) {
             ctx.startForegroundService(Intent(ctx, CounterService::class.java))

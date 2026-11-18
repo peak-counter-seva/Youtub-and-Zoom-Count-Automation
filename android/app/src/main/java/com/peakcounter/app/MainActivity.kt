@@ -184,7 +184,7 @@ class MainActivity : AppCompatActivity() {
             root.addView(list(rowBase().apply {
                 addView(twoLines(w.title, ZoomWatcher.stateText(w.state, w.count)), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(button("Show", if (w.state == "captcha") Style.PRIMARY else Style.OUTLINE) {
-                    startActivity(Intent(this@MainActivity, ZoomActivity::class.java).putExtra(ZoomActivity.EXTRA_RUN, w.runId))
+                    startActivity(Intent(this@MainActivity, ZoomActivity::class.java).putExtra(ZoomActivity.EXTRA_RUN, w.id))
                 }.apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f); setPadding(dp(14), 0, dp(14), 0) },
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)))
             }), lp(top = 10))
