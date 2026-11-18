@@ -245,7 +245,17 @@ async def main(run_id: str):
     polls = {s["key"]: max(10, int(s.get("pollSeconds") or poll)) for s in sources}
     next_yt = {s["key"]: 0.0 for s in sources}
     tick = min(([ZOOM_EVERY] if zoom else []) + list(polls.values()) or [poll])
-    next_zoom = 0.0
+    # Zoom is read in its own task: joining can take minutes (robot checks, waiting room), and that
+    # must never hold up YouTube readings, saves, Stop, or picking up streams added mid-run.
+    zoom_box: dict = {"fresh": False}
+
+    async def zoom_worker():
+        while True:
+            zn = await read_zoom(zoom)
+            zoom_box.update(value=zn, at=now(), fresh=True)
+            await asyncio.sleep(ZOOM_EVERY if zoom.joined else ZOOM_RETRY_EVERY)
+
+    zoom_task = asyncio.create_task(zoom_worker()) if zoom else None
     last_stop_check = time.monotonic()
     try:
         while True:
@@ -263,13 +273,14 @@ async def main(run_id: str):
                 for s in due_now:  # set first so a failing read retries after its interval, not every tick
                     next_yt[s["key"]] = mono + polls[s["key"]]
                 if due_now:
-                    for key, r in read_youtube(yt, due_now, windows, t).items():
+                    readings = await asyncio.to_thread(read_youtube, yt, due_now, windows, t)
+                    for key, r in readings.items():
                         tracker.update(key, r, t)
-                if zoom and mono >= next_zoom:
-                    zn = await read_zoom(zoom)
-                    next_zoom = mono + (ZOOM_EVERY if zoom.joined else ZOOM_RETRY_EVERY)
+                if zoom and zoom_box["fresh"]:
+                    zoom_box["fresh"] = False
+                    zn = zoom_box["value"]
                     tracker.update(zcfg.get("key") or "zoom", {"label": zcfg.get("label") or "Zoom", "value": zn,
-                                                              "note": "" if zn is not None else zoom.status}, now())
+                                                              "note": "" if zn is not None else zoom.status}, zoom_box["at"])
                 last_error = None
             except Exception as e:  # noqa: BLE001 - keep counting through a bad reading
                 log.exception("reading failed")
@@ -322,6 +333,12 @@ async def main(run_id: str):
                 run.merge_peaks(tracker.payload(), moments=tracker.moment_payload())
             except Exception:  # noqa: BLE001
                 log.exception("final save failed")
+        if zoom_task:
+            zoom_task.cancel()
+            try:
+                await zoom_task
+            except BaseException:  # noqa: BLE001 - cancelled on purpose
+                pass
         if zoom:
             await zoom.close()
         if not handed_over:
