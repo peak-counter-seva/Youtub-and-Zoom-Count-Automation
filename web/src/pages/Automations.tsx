@@ -204,8 +204,8 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
     if (moments.some((m) => !m.at)) return setErr("Each moment needs a time.");
     if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube stream needs a link (or a channel link to search).");
     if (a.youtube.some((y) => y.findTitle !== undefined && !y.findTitle.trim())) return setErr("Enter words from the live stream’s title, or switch back to a fixed link.");
-    if (a.youtube.some((y) => y.mode === "window" && (!y.windowStart || !y.windowEnd)))
-      return setErr("24×7 streams need a from and to time.");
+    if (a.youtube.some((y) => y.mode === "window" && y.windowStart !== undefined && (!y.windowStart || !y.windowEnd)))
+      return setErr("Fill in both custom times, or choose “Whole automation time”.");
     if (a.zoom.enabled && !a.zoom.link.trim()) return setErr("Add the Zoom invite link, or turn Zoom off.");
     if (!a.sms.to.trim()) return setErr("Add the phone number the SMS goes to.");
     setSaving(true);
@@ -345,9 +345,17 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
               <span>Stream type</span>
               <Segmented value={y.mode} onChange={(m) => setYt(i, { mode: m })}
                 options={[{ value: "event", label: "Live event" }, { value: "window", label: "24×7 stream" }]} />
-              <span className="hint">{y.mode === "event" ? "Counted whenever it is live during the run." : "Counted only between the times below."}</span>
+              <span className="hint">{y.mode === "event" ? "Counted whenever it is live during the run." : (y.windowStart !== undefined ? "Counted only between the times below." : `Counted for the automation’s own time (${a.startTime} – ${a.endTime}).`)}</span>
             </div>
             {y.mode === "window" && (
+              <div className="field" style={{ marginTop: 12 }}>
+                <span>Count during</span>
+                <Segmented value={y.windowStart !== undefined ? "custom" : "all"}
+                  onChange={(v) => setYt(i, v === "custom" ? { windowStart: a.startTime, windowEnd: a.endTime } : { windowStart: undefined, windowEnd: undefined })}
+                  options={[{ value: "all", label: "Whole automation time" }, { value: "custom", label: "Custom times" }]} />
+              </div>
+            )}
+            {y.mode === "window" && y.windowStart !== undefined && (
               <div className="field-grid" style={{ ["--cols" as string]: 2 }}>
                 <Field label="From"><input className="input" type="time" value={y.windowStart ?? ""} onChange={(e) => setYt(i, { windowStart: e.target.value })} /></Field>
                 <Field label="To"><input className="input" type="time" value={y.windowEnd ?? ""} onChange={(e) => setYt(i, { windowEnd: e.target.value })} /></Field>
