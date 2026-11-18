@@ -392,7 +392,8 @@ class CounterService : Service() {
                 // Join 2 minutes early; stay until just after the end so the last peak is saved
                 // before the GitHub counter writes the SMS (it waits 30 s for this).
                 if (nowS < start - 120 || nowS >= end + 15) continue
-                val meeting = try { ZoomWatcher.parseLink(link, null).first } catch (e: IllegalArgumentException) {
+                // Keyed by meeting and passcode: a passcode edited during a run makes the phone rejoin with it.
+                val meeting = try { ZoomWatcher.parseLink(link, null).first + "#" + ((z["passcode"] as? String)?.trim() ?: "") } catch (e: IllegalArgumentException) {
                     if (zoomFailed.add(d.id)) scope.launch { note(d.id, "Phone: ${e.message}") }
                     continue
                 }

@@ -211,8 +211,7 @@ async def main(run_id: str):
         yt_key = (ysnap.to_dict() or {}).get("apiKey") if ysnap.exists else None
     yt = YouTubeReader(yt_key)
     sources = cfg.get("youtube", [])
-    windows = {s["key"]: window_for(start_at, s["windowStart"], s["windowEnd"])
-               for s in sources if s.get("mode") == "window" and s.get("windowStart") and s.get("windowEnd")}
+    windows = windows_for(start_at, sources)
 
     zcfg = cfg.get("zoom") or {}
     zoom = None
@@ -288,11 +287,30 @@ async def main(run_id: str):
                 last_stop_check = mono
                 stop = bool(data.get("stopRequested"))
                 tracker.moments = moment_windows(data)  # picks up moments marked from the website
+                fresh = data
             elif mono - last_stop_check >= STOP_CHECK_EVERY:
                 fresh = run.ref.get().to_dict() or {}
                 stop = bool(fresh.get("stopRequested"))
                 tracker.moments = moment_windows(fresh) or tracker.moments
                 last_stop_check = mono
+            else:
+                fresh = None
+            # The automation was edited while running (e.g. today's live link): use the new streams.
+            new_yt = ((fresh or {}).get("config") or {}).get("youtube")
+            if new_yt is not None and new_yt != sources:
+                old_urls = {x["key"]: x.get("url") for x in sources}
+                poll = max(10, int(fresh["config"].get("pollSeconds") or poll))
+                sources = new_yt
+                windows = windows_for(start_at, sources)
+                polls = {x["key"]: max(10, int(x.get("pollSeconds") or poll)) for x in sources}
+                next_yt = {x["key"]: (next_yt.get(x["key"], 0.0) if old_urls.get(x["key"]) == x.get("url") else 0.0) for x in sources}
+                keep = {x["key"] for x in sources} | ({zcfg.get("key") or "zoom"} if zoom else set())
+                for k in list(tracker.readings):
+                    if k not in keep:
+                        tracker.readings.pop(k, None)
+                tick = min(([ZOOM_EVERY] if zoom else []) + list(polls.values()) or [poll])
+                tracker.step = max(1, int(fresh["config"].get("saveStep") or tracker.step))
+                run.note("Settings changed: now counting " + ", ".join(x.get("label") or x["key"] for x in sources) + ".")
             if stop:
                 stopped = True
                 run.note("Stop requested.")
@@ -310,6 +328,11 @@ async def main(run_id: str):
             if zcfg.get("enabled") and zoom_via != "github" and not stopped:
                 await asyncio.sleep(30)  # let the sender phone save its last Zoom peak
             finish(db, run, stopped)
+
+
+def windows_for(start_at, sources) -> dict:
+    return {s["key"]: window_for(start_at, s["windowStart"], s["windowEnd"])
+            for s in sources if s.get("mode") == "window" and s.get("windowStart") and s.get("windowEnd")}
 
 
 def moment_windows(data: dict) -> list[tuple[str, datetime, datetime, str]]:

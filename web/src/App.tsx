@@ -43,6 +43,7 @@ function Shell() {
   const user = useUser();
   const allowed = useDocument<Allowed>("allowedUsers", user?.email?.toLowerCase() ?? null);
   const [tab, setTab] = useState<Tab>("automations");
+  const [editId, setEditId] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
   const [signInErr, setSignInErr] = useState<string | null>(null);
 
@@ -118,8 +119,8 @@ function Shell() {
       )}
 
       <main className="page">
-        {tab === "automations" && <Automations email={user.email!} onStarted={() => setTab("runs")} />}
-        {tab === "runs" && <Runs />}
+        {tab === "automations" && <Automations email={user.email!} onStarted={() => setTab("runs")} editId={editId} onEditOpened={() => setEditId(null)} />}
+        {tab === "runs" && <Runs onEdit={(id) => { setEditId(id); setTab("automations"); }} />}
         {tab === "settings" && <Settings isAdmin={isAdmin} />}
       </main>
 
