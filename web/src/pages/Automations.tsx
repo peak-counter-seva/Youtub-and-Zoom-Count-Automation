@@ -257,6 +257,16 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
         </div>
         {a.zoom.enabled && (
           <>
+            <div className="field" style={{ marginBottom: 16 }}>
+              <span>Count from</span>
+              <Segmented value={a.zoom.via ?? "both"} onChange={(v) => setZoom({ via: v })}
+                options={[{ value: "both", label: "Phone + cloud" }, { value: "phone", label: "Sender phone" }, { value: "github", label: "Cloud" }]} />
+              <span className="hint">
+                {(a.zoom.via ?? "both") === "github"
+                  ? "Joins from GitHub's servers. Zoom sometimes asks these for a robot check."
+                  : "The sender phone joins in the background on its own internet, which Zoom trusts more. Keep it on and online during the meeting."}
+              </span>
+            </div>
             <Field label="Invite link">
               <input className="input" inputMode="url" value={a.zoom.link} onChange={(e) => setZoom({ link: e.target.value })} placeholder="zoom.us/j/123…?pwd=…" />
             </Field>

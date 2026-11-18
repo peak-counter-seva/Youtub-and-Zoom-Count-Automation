@@ -22,7 +22,13 @@ class App : Application() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "Peak Counter", NotificationManager.IMPORTANCE_LOW),
         )
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(ALERTS, "Needs your tap", NotificationManager.IMPORTANCE_HIGH),
+        )
     }
 
-    companion object { const val CHANNEL = "counter" }
+    companion object {
+        const val CHANNEL = "counter"
+        const val ALERTS = "alerts"
+    }
 }

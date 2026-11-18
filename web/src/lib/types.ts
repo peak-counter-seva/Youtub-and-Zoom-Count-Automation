@@ -18,6 +18,7 @@ export interface ZoomSource {
   link: string; // full invite link, may include ?pwd=
   passcode?: string;
   displayName: string; // name the counting guest joins with
+  via?: "both" | "phone" | "github"; // who joins to count (default both)
 }
 
 export interface Automation {

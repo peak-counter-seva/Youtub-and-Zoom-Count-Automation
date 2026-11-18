@@ -129,8 +129,12 @@ class Run:
             for key, r in readings.items():
                 p = peaks.get(key) or {"label": r["label"], "current": None, "peak": None, "peakAt": None, "lastAt": None}
                 p["label"] = r["label"]
-                p["current"] = r["value"]
-                p["note"] = r.get("note", "")
+                # The sender phone may count the same source; don't blank out its fresh reading.
+                last = p.get("lastAt")
+                fresh = last is not None and (ts - last).total_seconds() < 30
+                if r["value"] is not None or not fresh:
+                    p["current"] = r["value"]
+                    p["note"] = r.get("note", "")
                 if r["value"] is not None:
                     p["lastAt"] = ts
                 # The tracker passes the exact highest value seen (and when), even if it was never saved.
@@ -184,7 +188,8 @@ async def main(run_id: str):
 
     zcfg = cfg.get("zoom") or {}
     zoom = None
-    if zcfg.get("enabled") and zcfg.get("link"):
+    zoom_via = zcfg.get("via") or "both"  # "both", "phone" or "github"
+    if zcfg.get("enabled") and zcfg.get("link") and zoom_via != "phone":
         from zoom import ZoomCounter
         try:
             zoom = ZoomCounter(zcfg["link"], zcfg.get("passcode"), zcfg.get("displayName") or "Count")
@@ -265,6 +270,8 @@ async def main(run_id: str):
         if zoom:
             await zoom.close()
         if not handed_over:
+            if zcfg.get("enabled") and zoom_via != "github" and not stopped:
+                await asyncio.sleep(30)  # let the sender phone save its last Zoom peak
             finish(db, run, stopped)
 
 
