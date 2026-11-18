@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { deleteAutomation, saveAutomation, startRun, updateYoutubeLinks } from "../lib/api";
+import { useEffect, useRef, useState } from "react";
+import { deleteAutomation, liveRunsOf, saveAutomation, startRun, updateYoutubeLinks } from "../lib/api";
 import { useCollection } from "../lib/hooks";
 import { computeWindow, fmtDayIST, fmtTimeIST } from "../lib/time";
 import {
@@ -26,11 +26,19 @@ const blank = (email: string): Automation => ({
 const POLL_CHOICES = [10, 15, 20, 30, 45, 60, 120, 300];
 const fmtSecs = (s: number) => (s >= 60 && s % 60 === 0 ? `${s / 60} minute${s === 60 ? "" : "s"}` : `${s} seconds`);
 
-export default function Automations({ email, onStarted }: { email: string; onStarted: () => void }) {
+export default function Automations({ email, onStarted, editId, onEditOpened }: {
+  email: string; onStarted: () => void; editId?: string | null; onEditOpened?: () => void;
+}) {
   const { items, error } = useCollection<Automation>("automations");
   const { items: devices } = useCollection<Device>("devices");
   const { confirm, toast } = useUi();
   const [editing, setEditing] = useState<Automation | null>(null);
+  // Opened from a live run's Edit button.
+  useEffect(() => {
+    if (!editId) return;
+    const a = items.find((x) => x.id === editId);
+    if (a) { setEditing(a); onEditOpened?.(); }
+  }, [editId, items, onEditOpened]);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -136,6 +144,10 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const tplRef = useRef<HTMLTextAreaElement>(null);
+  const [liveCount, setLiveCount] = useState(0);
+  useEffect(() => {
+    if (value.id) liveRunsOf(value.id).then((r) => setLiveCount(r.length)).catch(() => {});
+  }, [value.id]);
   const set = (patch: Partial<Automation>) => setA({ ...a, ...patch });
   const setYt = (i: number, patch: Partial<YoutubeSource>) =>
     set({ youtube: a.youtube.map((y, j) => (j === i ? { ...y, ...patch } : y)) });
@@ -198,7 +210,7 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
     setSaving(true);
     try {
       await saveAutomation(a, email, a.id ? value : undefined);
-      toast("Automation saved");
+      toast(liveCount > 0 ? "Saved. The live run uses it within a minute." : "Automation saved");
       onDone();
     } catch (e) {
       setErr((e as Error).message);
@@ -226,6 +238,9 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <p>All times are India time (IST).</p>
         </div>
       </div>
+      {liveCount > 0 && (
+        <Notice tone="info">This automation is counting now. When you save, the live run switches to the new links and settings within a minute. Its start and end times stay the same.</Notice>
+      )}
 
       <section className="card card-pad">
         <div className="form-section-head">

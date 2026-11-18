@@ -1,6 +1,6 @@
 import {
   addDoc, collection, deleteDoc, doc, getDoc, serverTimestamp, setDoc,
-  Timestamp, updateDoc, arrayUnion,
+  Timestamp, updateDoc, arrayUnion, getDocs, query, where,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { renderTemplate, runValues, type Automation, type Run } from "./types";
@@ -16,6 +16,7 @@ export async function saveAutomation(a: Automation, email: string, before?: Auto
   const payload = { ...data, createdBy: data.createdBy || email, updatedAt: serverTimestamp() };
   if (id) {
     await setDoc(doc(db, "automations", id), payload);
+    await syncLiveRuns(id, a.name, { ...data, createdBy: payload.createdBy });
     return id;
   }
   const ref = await addDoc(collection(db, "automations"), payload);
@@ -26,6 +27,32 @@ export async function saveAutomation(a: Automation, email: string, before?: Auto
 export async function updateYoutubeLinks(a: Automation, urls: Record<number, string>) {
   const youtube = a.youtube.map((y, i) => (urls[i] !== undefined ? { ...y, url: urls[i].trim() } : y));
   await updateDoc(doc(db, "automations", a.id), { youtube, linksUpdatedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  const { id, ...data } = a;
+  await syncLiveRuns(id, a.name, { ...data, youtube });
+}
+
+const LIVE = ["queued", "waiting", "running"];
+
+/** Runs of this automation that are counting now. */
+export async function liveRunsOf(automationId: string) {
+  const snap = await getDocs(query(collection(db, "runs"), where("automationId", "==", automationId)));
+  return snap.docs.filter((d) => LIVE.includes(d.get("status")) && !d.get("stopRequested"));
+}
+
+/**
+ * Copy edited settings into runs of this automation that are counting now. The run's start and
+ * end times stay as they were; everything else (links, streams, Zoom, totals, moments, SMS) changes.
+ */
+async function syncLiveRuns(automationId: string, name: string, config: Record<string, unknown>) {
+  const { updatedAt: _u, linksUpdatedAt: _l, ...clean } = config as Record<string, unknown>;
+  void _u; void _l;
+  for (const d of await liveRunsOf(automationId)) {
+    await updateDoc(d.ref, {
+      config: clean,
+      automationName: name,
+      log: arrayUnion(`${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata" })} Settings updated from the automation; the counter switches to them within a minute.`),
+    });
+  }
 }
 
 export async function deleteAutomation(id: string) {

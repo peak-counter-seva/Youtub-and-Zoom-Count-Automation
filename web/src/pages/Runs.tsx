@@ -20,7 +20,7 @@ const SMS_TEXT = { pending: "Waiting to send", sent: "Sent", failed: "Not sent" 
 const isActive = (r: Run) => ["queued", "waiting", "running"].includes(r.status);
 const fmtN = (n: number | null | undefined) => (n === null || n === undefined ? "–" : n.toLocaleString("en-IN"));
 
-export default function Runs() {
+export default function Runs({ onEdit }: { onEdit: (automationId: string) => void }) {
   const { items, error } = useCollection<Run>("runs", "createdAt", 30);
   const live = items.filter(isActive);
   const past = items.filter((r) => !isActive(r));
@@ -41,7 +41,7 @@ export default function Runs() {
       {live.length > 0 && (
         <>
           <div className="section-title">Now <span className="count">{live.length}</span></div>
-          {live.map((r) => <RunCard key={r.id} r={r} />)}
+          {live.map((r) => <RunCard key={r.id} r={r} onEdit={() => onEdit(r.automationId)} />)}
         </>
       )}
       {past.length > 0 && (
@@ -54,7 +54,7 @@ export default function Runs() {
   );
 }
 
-function RunCard({ r }: { r: Run }) {
+function RunCard({ r, onEdit }: { r: Run; onEdit?: () => void }) {
   const { confirm, toast } = useUi();
   const active = isActive(r);
   const stale = active && r.status === "running" && r.heartbeatAt && Date.now() - r.heartbeatAt.toMillis() > 3 * 60000;
@@ -128,6 +128,7 @@ function RunCard({ r }: { r: Run }) {
           <div className="btn-row" style={{ alignSelf: "flex-start" }}>
             {active && !r.stopRequested && (
               <>
+                {onEdit && <button className="btn btn-sm" onClick={onEdit}><Icon name="pencil" size={14} /> Edit</button>}
                 <button className="btn btn-sm" onClick={() => setSheet("moment")}><Icon name="clock" size={14} /> Mark moment</button>
                 <button className="btn btn-sm" onClick={() => setSheet("send")}><Icon name="send" size={14} /> Send SMS now</button>
                 <button className="btn btn-danger btn-sm" onClick={stop}><Icon name="stop" size={12} /> Stop now</button>
