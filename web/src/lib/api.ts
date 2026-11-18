@@ -6,7 +6,22 @@ import { db } from "./firebase";
 import { renderTemplate, runValues, type Automation, type Run } from "./types";
 import { computeWindow } from "./time";
 
-export async function saveAutomation(a: Automation, email: string, before?: Automation) {
+/** Turn copied Timestamps (plain {seconds, nanoseconds} maps, e.g. after structuredClone) back into Timestamps. */
+function fixTimestamps<T>(v: T): T {
+  if (Array.isArray(v)) return v.map(fixTimestamps) as T;
+  if (v && typeof v === "object" && !(v instanceof Timestamp)) {
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o);
+    if (keys.length === 2 && typeof o.seconds === "number" && typeof o.nanoseconds === "number")
+      return new Timestamp(o.seconds, o.nanoseconds) as T;
+    if (Object.getPrototypeOf(v) === Object.prototype)
+      return Object.fromEntries(keys.map((k) => [k, fixTimestamps(o[k])])) as T;
+  }
+  return v;
+}
+
+export async function saveAutomation(input: Automation, email: string, before?: Automation) {
+  const a = fixTimestamps(input);
   const { id, ...data } = a;
   // Remember when the Zoom passcode was set, for the weekly reminder.
   const z = before?.zoom;
@@ -24,7 +39,8 @@ export async function saveAutomation(a: Automation, email: string, before?: Auto
 }
 
 /** Change only the YouTube links (the daily live event link), without opening the full editor. */
-export async function updateYoutubeLinks(a: Automation, urls: Record<number, string>) {
+export async function updateYoutubeLinks(input: Automation, urls: Record<number, string>) {
+  const a = fixTimestamps(input);
   const youtube = a.youtube.map((y, i) => (urls[i] !== undefined ? { ...y, url: urls[i].trim() } : y));
   await updateDoc(doc(db, "automations", a.id), { youtube, linksUpdatedAt: serverTimestamp(), updatedAt: serverTimestamp() });
   const { id, ...data } = a;
