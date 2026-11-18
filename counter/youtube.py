@@ -60,6 +60,58 @@ def resolve_live_id(url: str, session: requests.Session) -> str | None:
         return None
 
 
+def _channel_streams_url(url: str) -> str:
+    u = url.strip()
+    if "://" not in u:
+        u = "https://" + u
+    u = u.split("?")[0].rstrip("/")
+    u = re.sub(r"/(live|streams|featured|videos|about)$", "", u)
+    return u + "/streams"
+
+
+def _walk(o):
+    if isinstance(o, dict):
+        yield o
+        for v in o.values():
+            yield from _walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _walk(v)
+
+
+def find_live_by_title(channel_url: str, words: str, session: requests.Session) -> str | None:
+    """Find a channel's stream whose title contains `words`: one live now first, else an upcoming one.
+
+    Reads the channel's public Live tab page, so it costs no API units.
+    """
+    want = words.strip().casefold()
+    try:
+        r = session.get(_channel_streams_url(channel_url), headers={"User-Agent": UA, "Accept-Language": "en"},
+                        timeout=20, cookies={"CONSENT": "YES+1"})
+        m = re.search(r"var ytInitialData\s*=\s*(\{.*?\});\s*</script>", r.text, re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(1))
+    except (requests.RequestException, ValueError) as e:
+        log.warning("channel search failed for %s: %s", channel_url, e)
+        return None
+    live, upcoming = None, None
+    for node in _walk(data):
+        v = node.get("videoRenderer") or node.get("gridVideoRenderer")
+        if not isinstance(v, dict) or "videoId" not in v:
+            continue
+        t = v.get("title") or {}
+        title = t.get("simpleText") or "".join(x.get("text", "") for x in t.get("runs", []))
+        if want not in title.casefold():
+            continue
+        blob = json.dumps(v.get("thumbnailOverlays", [])) + json.dumps(v.get("badges", []))
+        if "LIVE" in blob and "UPCOMING" not in blob:
+            live = live or v["videoId"]
+        elif "UPCOMING" in blob or "upcomingEventData" in v:
+            upcoming = upcoming or v["videoId"]
+    return live or upcoming
+
+
 def fetch_api(ids: list[str], api_key: str, session: requests.Session) -> dict[str, Reading]:
     out: dict[str, Reading] = {}
     for i in range(0, len(ids), 50):
@@ -99,6 +151,14 @@ class YouTubeReader:
         self.api_key = api_key
         self.session = requests.Session()
         self._resolved: dict[str, tuple[str | None, float]] = {}
+
+    def id_for_title(self, url: str, words: str, now_ts: float) -> str | None:
+        """Today's stream on a channel by title words. Looked up again every 2 minutes (every minute until found)."""
+        key = url + "|" + words
+        cached = self._resolved.get(key)
+        if not cached or now_ts - cached[1] > (120 if cached[0] else 60):
+            self._resolved[key] = (find_live_by_title(url, words, self.session), now_ts)
+        return self._resolved[key][0]
 
     def ids_for(self, urls: list[str], now_ts: float) -> dict[str, str | None]:
         out = {}

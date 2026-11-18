@@ -365,3 +365,9 @@ details.log pre { margin: 10px 0 0; font: 11.5px/1.55 ui-monospace, "SF Mono", M
 .links-row { display: flex; gap: 8px; }
 .links-row .input { flex: 1; min-width: 0; }
 .links-edit .btn-row { justify-content: flex-end; }
+
+/* Auto start + message preset */
+.auto-start { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.auto-start b { font-size: 14px; font-weight: 600; }
+.auto-start p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.msg-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

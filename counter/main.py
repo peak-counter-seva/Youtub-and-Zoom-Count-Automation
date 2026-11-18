@@ -180,6 +180,10 @@ class Run:
 
 
 def dispatch_continuation(run_id: str) -> bool:
+    return dispatch_run(run_id, continuation=True)
+
+
+def dispatch_run(run_id: str, continuation: bool = False) -> bool:
     token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
     ref = os.environ.get("GITHUB_REF_NAME", "main")
     if not token or not repo:
@@ -187,7 +191,7 @@ def dispatch_continuation(run_id: str) -> bool:
     r = requests.post(
         f"https://api.github.com/repos/{repo}/actions/workflows/counter.yml/dispatches",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-        json={"ref": ref, "inputs": {"run_id": run_id, "continuation": "true"}}, timeout=20,
+        json={"ref": ref, "inputs": {"run_id": run_id, "continuation": "true" if continuation else "false"}}, timeout=20,
     )
     return r.status_code == 204
 
@@ -379,11 +383,14 @@ def build_values(data: dict) -> dict:
     """Every SMS value. Keep in step with buildValues in web/src/lib/types.ts and Values.kt."""
     cfg = data["config"]
     srcs = [(y["key"], y.get("label") or y["key"]) for y in cfg.get("youtube", [])]
+    yt_keys = [k for k, _ in srcs]
     z = cfg.get("zoom") or {}
     if z.get("enabled"):
         srcs.append((z.get("key") or "zoom", z.get("label") or "Zoom"))
     groups = [g for g in cfg.get("totals") or [] if g.get("key")]
-    v: dict = {"name": data.get("automationName", ""), "date": fmt_date(data["startAt"])}
+    st = data["startAt"].astimezone(IST)
+    v: dict = {"name": data.get("automationName", ""), "date": fmt_date(data["startAt"]),
+               "day": f"{st.day} {st:%b %Y}"}
 
     def total(vals):
         nums = [x for x in vals if isinstance(x, (int, float))]
@@ -393,6 +400,7 @@ def build_values(data: dict) -> dict:
         for k, _ in srcs:
             v[prefix + k] = get(k) if get(k) is not None else "NA"
         v[prefix + "total"] = total([get(k) for k, _ in srcs])
+        v[prefix + "youtube"] = total([get(k) for k in yt_keys])
         for g in groups:
             v[prefix + g["key"]] = total([get(k) for k in g.get("sources", [])])
 
@@ -415,17 +423,26 @@ def build_values(data: dict) -> dict:
 
 def read_youtube(yt, sources, windows, t) -> dict[str, dict]:
     readings: dict[str, dict] = {}
-    ids = yt.ids_for([s["url"] for s in sources], time.time())
-    res = yt.read([v for v in ids.values() if v])
+    ts = time.time()
+    fixed = [s["url"] for s in sources if not (s.get("mode") == "event" and s.get("findTitle"))]
+    ids = yt.ids_for(fixed, ts)
+    vids: dict[str, str | None] = {}
     for s in sources:
-        vid = ids.get(s["url"])
+        if s.get("mode") == "event" and s.get("findTitle"):
+            vids[s["key"]] = yt.id_for_title(s["url"], s["findTitle"], ts)
+        else:
+            vids[s["key"]] = ids.get(s["url"])
+    res = yt.read([v for v in vids.values() if v])
+    for s in sources:
+        vid = vids.get(s["key"])
         r = res.get(vid) if vid else None
         in_window = True
         if s["key"] in windows:
             ws, we = windows[s["key"]]
             in_window = ws <= t < we
         if r is None:
-            readings[s["key"]] = {"label": s["label"], "value": None, "note": "no live video found"}
+            note = f"no stream titled “{s['findTitle']}” yet" if s.get("findTitle") and s.get("mode") == "event" else "no live video found"
+            readings[s["key"]] = {"label": s["label"], "value": None, "note": note}
         elif not in_window:
             readings[s["key"]] = {"label": s["label"], "value": None, "note": "outside its time window"}
         elif not r.live or r.viewers is None:

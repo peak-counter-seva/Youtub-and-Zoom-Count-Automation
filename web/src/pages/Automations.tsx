@@ -3,7 +3,7 @@ import { deleteAutomation, liveRunsOf, saveAutomation, startRun, updateYoutubeLi
 import { useCollection } from "../lib/hooks";
 import { computeWindow, fmtDayIST, fmtTimeIST } from "../lib/time";
 import {
-  asDate, buildValues, DEFAULT_ZOOM_VIA, momentWindow, passcodeDue, WEEKDAYS, renderTemplate, sourcesOf,
+  asDate, buildValues, DEFAULT_ZOOM_VIA, fmtDate, fmtDay, satsangTemplate, momentWindow, passcodeDue, WEEKDAYS, renderTemplate, sourcesOf,
   type Automation, type Device, type Moment, type TotalGroup, type YoutubeSource,
 } from "../lib/types";
 import { Empty, Field, Icon, Notice, Segmented, Switch, useUi } from "../components/ui";
@@ -50,7 +50,7 @@ export default function Automations({ email, onStarted, editId, onEditOpened }: 
     const ok = await confirm({
       title: `Start “${a.name}”?`,
       body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.` +
-        (a.youtube.some((y) => y.mode === "event") && (!a.linksUpdatedAt || fmtDayIST(asDate(a.linksUpdatedAt)) !== "Today")
+        (a.youtube.some((y) => y.mode === "event" && y.findTitle === undefined) && (!a.linksUpdatedAt || fmtDayIST(asDate(a.linksUpdatedAt)) !== "Today")
           ? "\n\nThe live event link wasn’t changed today. Check it first if it’s a new stream."
           : ""),
       confirm: "Start",
@@ -170,14 +170,14 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
   const now = new Date();
   const sample = buildValues(
     a,
-    { name: a.name || "Satsang", date: now.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata" }).replace(/\//g, "-") },
+    { name: a.name || "Satsang", date: fmtDate(now), day: fmtDay(now) },
     samplePeaks,
     moments.filter((m) => m.key && m.at).map((m) => ({ key: m.key, label: m.label || m.key, ...momentWindow(now, m.at, m.minutes) })),
     Object.fromEntries(moments.map((m) => [m.key, sampleMoment])),
   );
   const tokens = [
-    "name", "date", ...sources.map((x) => x.key),
-    ...(sources.length > 1 ? ["total"] : []), ...totals.filter((g) => g.key).map((g) => g.key),
+    "name", "date", "day", ...sources.map((x) => x.key),
+    ...(sources.length > 1 ? ["total"] : []), ...(a.youtube.length > 1 && a.zoom.enabled ? ["youtube"] : []), ...totals.filter((g) => g.key).map((g) => g.key),
     ...moments.filter((m) => m.key).flatMap((m) => [`${m.key}.total`, ...sources.map((x) => `${m.key}.${x.key}`), `${m.key}.time`]),
     "moments",
   ];
@@ -195,14 +195,15 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
   async function save() {
     const keys = sources.map((x) => x.key);
     const extra = [...totals.map((g) => g.key), ...moments.map((m) => m.key)];
-    const all = [...keys, ...extra, "name", "date", "total", "moments"];
+    const all = [...keys, ...extra, "name", "date", "day", "total", "youtube", "moments"];
     setErr(null);
     if (!a.name.trim()) return setErr("Give the automation a name.");
     if (new Set(all).size !== all.length) return setErr("Each source, total and moment needs a different SMS tag (and not name, date, total or moments).");
     if ([...keys, ...extra].some((k) => !/^\w+$/.test(k))) return setErr("SMS tags can use only letters, numbers and _.");
     if (totals.some((g) => g.sources.filter((k) => keys.includes(k)).length === 0)) return setErr("Each total needs at least one source ticked.");
     if (moments.some((m) => !m.at)) return setErr("Each moment needs a time.");
-    if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube stream needs a link.");
+    if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube stream needs a link (or a channel link to search).");
+    if (a.youtube.some((y) => y.findTitle !== undefined && !y.findTitle.trim())) return setErr("Enter words from the live stream’s title, or switch back to a fixed link.");
     if (a.youtube.some((y) => y.mode === "window" && (!y.windowStart || !y.windowEnd)))
       return setErr("24×7 streams need a from and to time.");
     if (a.zoom.enabled && !a.zoom.link.trim()) return setErr("Add the Zoom invite link, or turn Zoom off.");
@@ -266,6 +267,30 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
             </select>
           </Field>
         </div>
+        <div className="auto-start">
+          <div>
+            <b>Start by itself</b>
+            <p>Starts a few minutes before the start time, so no one has to press Start.</p>
+          </div>
+          <Switch on={!!a.autoStart} onChange={(v) => set({ autoStart: v })} label="Start by itself" />
+        </div>
+        {a.autoStart && (
+          <div className="field" style={{ marginTop: 10 }}>
+            <span>On these days</span>
+            <div className="picks">
+              {WEEKDAYS.map((d, i) => {
+                const days = a.autoDays?.length ? a.autoDays : [0, 1, 2, 3, 4, 5, 6];
+                const on = days.includes(i);
+                return (
+                  <button type="button" key={d} className={`pick ${on ? "on" : ""}`} aria-pressed={on}
+                    onClick={() => { const next = on ? days.filter((x) => x !== i) : [...days, i].sort(); set({ autoDays: next.length === 7 ? [] : next }); }}>
+                    {d.slice(0, 3)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <p className="hint" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
           Zoom is checked every 3 seconds. The exact highest number is always kept, even between saves. If the end is earlier than the start, it ends the next day.
         </p>
@@ -285,9 +310,33 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
                 <Icon name="trash" size={15} />
               </button>
             </div>
-            <Field label="Link">
-              <input className="input" inputMode="url" value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="youtube.com/live/…" />
-            </Field>
+            {y.mode === "event" && (
+              <div className="field" style={{ marginBottom: 4 }}>
+                <span>Today’s stream</span>
+                <Segmented value={y.findTitle !== undefined ? "find" : "link"}
+                  onChange={(v) => setYt(i, { findTitle: v === "find" ? (y.findTitle ?? "") : undefined })}
+                  options={[{ value: "link", label: "Paste link" }, { value: "find", label: "Find on channel" }]} />
+                <span className="hint">
+                  {y.findTitle !== undefined
+                    ? "Each time it counts, it looks on the channel for a live stream whose title has these words. No daily link change needed."
+                    : "Change the link from the automation card when there is a new stream."}
+                </span>
+              </div>
+            )}
+            {y.mode === "event" && y.findTitle !== undefined ? (
+              <div className="field-grid stack-sm" style={{ ["--cols" as string]: 2 }}>
+                <Field label="Channel link">
+                  <input className="input" inputMode="url" value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="youtube.com/@channel" />
+                </Field>
+                <Field label="Title contains">
+                  <input className="input" value={y.findTitle} onChange={(e) => setYt(i, { findTitle: e.target.value })} placeholder="કથા" />
+                </Field>
+              </div>
+            ) : (
+              <Field label="Link">
+                <input className="input" inputMode="url" value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="youtube.com/live/…" />
+              </Field>
+            )}
             <div className="field-grid" style={{ ["--cols" as string]: 2, gridTemplateColumns: "minmax(0,1fr) 110px" }}>
               <Field label="Label"><input className="input" value={y.label} onChange={(e) => setYt(i, { label: e.target.value })} /></Field>
               <Field label="SMS tag"><input className="input" value={y.key} onChange={(e) => setYt(i, { key: e.target.value })} /></Field>
@@ -438,13 +487,18 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <input className="input" type="tel" value={a.sms.to} onChange={(e) => setSms({ to: e.target.value })} placeholder="+91 98765 43210" />
         </Field>
         <div className="field" style={{ marginTop: 16 }}>
-          <span>Message</span>
-          <textarea ref={tplRef} className="input" rows={3} value={a.sms.template} onChange={(e) => setSms({ template: e.target.value })} />
+          <span className="msg-label">Message
+            <button type="button" className="btn btn-sm" onClick={async () => {
+              if (a.sms.template.trim() && !(await confirm({ title: "Use the Satsang format?", body: "This replaces the message below. You can still change it after.", confirm: "Use it" }))) return;
+              setSms({ template: satsangTemplate(a) });
+            }}>Use Satsang format</button>
+          </span>
+          <textarea ref={tplRef} className="input" rows={Math.min(14, Math.max(3, a.sms.template.split("\n").length + 1))} value={a.sms.template} onChange={(e) => setSms({ template: e.target.value })} />
           <div className="tokens">
             {tokens.map((t) => <button type="button" key={t} className="token" onClick={() => insertToken(t)}>{`{${t}}`}</button>)}
           </div>
           <span className="hint">
-            Tap a tag to insert it. {"{total}"} adds up every stream and Zoom. A moment tag like {"{aarti.total}"} uses only the highest counts during that moment, and {"{moments}"} lists every moment, including ones marked live. Missing values are sent as NA.
+            Tap a tag to insert it. {"{total}"} adds up every stream and Zoom, {"{youtube}"} only the YouTube streams, and {"{day}"} writes the date like 18 Nov 2026. A moment tag like {"{aarti.total}"} uses only the highest counts during that moment, and {"{moments}"} lists every moment, including ones marked live. Missing values are sent as NA.
           </span>
         </div>
         <div className="sms-preview">
@@ -472,7 +526,7 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
 /** The day's live event links, editable right on the card (they change every day). */
 function QuickLinks({ a }: { a: Automation }) {
   const { toast } = useUi();
-  const events = a.youtube.map((y, i) => ({ y, i })).filter(({ y }) => y.mode === "event");
+  const events = a.youtube.map((y, i) => ({ y, i })).filter(({ y }) => y.mode === "event" && y.findTitle === undefined);
   const [open, setOpen] = useState(false);
   const [urls, setUrls] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState(false);
