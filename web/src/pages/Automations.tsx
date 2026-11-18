@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { deleteAutomation, saveAutomation, startRun } from "../lib/api";
+import { deleteAutomation, saveAutomation, startRun, updateYoutubeLinks } from "../lib/api";
 import { useCollection } from "../lib/hooks";
 import { computeWindow, fmtDayIST, fmtTimeIST } from "../lib/time";
 import {
@@ -41,7 +41,10 @@ export default function Automations({ email, onStarted }: { email: string; onSta
     const { start, end } = computeWindow(a.startTime, a.endTime);
     const ok = await confirm({
       title: `Start “${a.name}”?`,
-      body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.`,
+      body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.` +
+        (a.youtube.some((y) => y.mode === "event") && (!a.linksUpdatedAt || fmtDayIST(a.linksUpdatedAt.toDate()) !== "Today")
+          ? "\n\nThe live event link wasn’t changed today. Check it first if it’s a new stream."
+          : ""),
       confirm: "Start",
     });
     if (!ok) return;
@@ -107,6 +110,7 @@ export default function Automations({ email, onStarted }: { email: string; onSta
                 {a.zoom.enabled && <span className="chip"><Icon name="users" size={14} /><span>Zoom</span></span>}
                 <span className="chip"><Icon name="message" size={14} /><span>{a.sms.to || "No number"}{sender ? ` · via ${sender}` : ""}</span></span>
               </div>
+              <QuickLinks a={a} />
               <div className="auto-actions">
                 <button className="btn btn-accent" disabled={busy === a.id} onClick={() => startAutomation(a)}>
                   <Icon name="play" size={14} /> {busy === a.id ? "Starting…" : "Start"}
@@ -445,6 +449,74 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
         {err && <div style={{ position: "absolute", left: 16, right: 16, bottom: "100%", marginBottom: 8 }}><Notice tone="error">{err}</Notice></div>}
         <button className="btn btn-lg" onClick={onDone}>Cancel</button>
         <button className="btn btn-primary btn-lg" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save automation"}</button>
+      </div>
+    </div>
+  );
+}
+
+/** The day's live event links, editable right on the card (they change every day). */
+function QuickLinks({ a }: { a: Automation }) {
+  const { toast } = useUi();
+  const events = a.youtube.map((y, i) => ({ y, i })).filter(({ y }) => y.mode === "event");
+  const [open, setOpen] = useState(false);
+  const [urls, setUrls] = useState<Record<number, string>>({});
+  const [saving, setSaving] = useState(false);
+  if (events.length === 0) return null;
+  const updated = a.linksUpdatedAt?.toDate();
+  const today = updated && fmtDayIST(updated) === "Today";
+
+  function begin() {
+    setUrls(Object.fromEntries(events.map(({ y, i }) => [i, y.url])));
+    setOpen(true);
+  }
+  async function paste(i: number) {
+    try {
+      const t = (await navigator.clipboard.readText()).trim();
+      if (t) setUrls((u) => ({ ...u, [i]: t }));
+      else toast("Nothing copied yet");
+    } catch {
+      toast("Long-press the box and choose Paste");
+    }
+  }
+  async function save() {
+    if (events.some(({ i }) => !(urls[i] ?? "").trim())) return toast("Every live event needs a link");
+    setSaving(true);
+    try {
+      await updateYoutubeLinks(a, urls);
+      toast("Links saved");
+      setOpen(false);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open)
+    return (
+      <button className={`links-bar ${today ? "" : "stale"}`} onClick={begin}>
+        <Icon name="video" size={15} />
+        <span>{events.length === 1 ? "Live event link" : `${events.length} live event links`}</span>
+        <small>{updated ? `changed ${fmtDayIST(updated).toLowerCase()}` : "change for today"}</small>
+        <Icon name="pencil" size={14} />
+      </button>
+    );
+
+  return (
+    <div className="links-edit">
+      {events.map(({ y, i }) => (
+        <label className="field" key={i}>
+          <span>{y.label || `Stream ${i + 1}`}</span>
+          <div className="links-row">
+            <input className="input" inputMode="url" value={urls[i] ?? ""} placeholder="youtube.com/live/…"
+              onChange={(e) => setUrls((u) => ({ ...u, [i]: e.target.value }))} onFocus={(e) => e.target.select()} />
+            <button type="button" className="btn" onClick={() => paste(i)}>Paste</button>
+          </div>
+        </label>
+      ))}
+      <div className="btn-row" style={{ marginTop: 12 }}>
+        <button className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>Cancel</button>
+        <button className="btn btn-primary btn-sm" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save links"}</button>
       </div>
     </div>
   );

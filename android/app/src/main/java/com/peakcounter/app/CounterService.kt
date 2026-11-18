@@ -333,7 +333,7 @@ class CounterService : Service() {
                 val old = (p["peak"] as? Number)?.toLong()
                 if (pair.second != null) {
                     p["lastAt"] = now
-                    if (old == null || pair.second!! > old) { p["peak"] = pair.second; p["peakAt"] = now }
+                    if (old == null || pair.second!! > old) { p["peak"] = pair.second; p["peakAt"] = now; p.remove("manualBy") }
                 }
                 peaks[key] = p
             }
@@ -533,6 +533,7 @@ class CounterService : Service() {
                 if (peak != null && (old == null || peak.toLong() > old)) {
                     p["peak"] = peak
                     p["peakAt"] = peakAt ?: now
+                    p.remove("manualBy") // the phone saw more than the number typed in
                 }
                 peaks[r.key] = p
                 val upd = mutableMapOf<String, Any?>("peaks" to peaks, "zoomPhoneAt" to now)

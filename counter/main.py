@@ -160,6 +160,7 @@ class Run:
                 if best is not None and (p.get("peak") is None or best > p["peak"]):
                     p["peak"] = best
                     p["peakAt"] = r.get("peakAt") or ts
+                    p.pop("manualBy", None)  # the counter saw more than the number typed in
                 peaks[key] = p
             upd = {"peaks": peaks, "heartbeatAt": ts, "engine": ENGINE}
             if moments:
