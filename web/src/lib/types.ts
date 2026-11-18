@@ -115,6 +115,19 @@ export interface Device {
   lastSeen?: Timestamp;
 }
 
+/**
+ * A stored time as a Date. Accepts a Firestore Timestamp and also a plain {seconds, nanoseconds}
+ * map (what a copied Timestamp turns into), so old data saved that way can't break the page.
+ */
+export function asDate(x: unknown): Date | undefined {
+  if (!x || typeof x !== "object") return undefined;
+  const o = x as { toDate?: () => Date; seconds?: number; nanoseconds?: number };
+  if (typeof o.toDate === "function") return o.toDate();
+  if (typeof o.seconds === "number") return new Date(o.seconds * 1000 + Math.floor((o.nanoseconds ?? 0) / 1e6));
+  if (x instanceof Date) return x;
+  return undefined;
+}
+
 export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /** Start (India time midnight) of the most recent passcode-change day, today included. */
@@ -128,7 +141,7 @@ export function lastPasscodeDay(day: number, now = new Date()): Date {
 export function passcodeDue(a: Pick<Automation, "zoom">, now = new Date()): boolean {
   const z = a.zoom;
   if (!z?.enabled || z.passcodeDay === undefined || z.passcodeDay === null) return false;
-  const changed = z.passcodeChangedAt?.toDate();
+  const changed = asDate(z.passcodeChangedAt);
   return !changed || changed < lastPasscodeDay(z.passcodeDay, now);
 }
 

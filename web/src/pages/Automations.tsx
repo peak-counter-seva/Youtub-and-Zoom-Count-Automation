@@ -3,7 +3,7 @@ import { deleteAutomation, liveRunsOf, saveAutomation, startRun, updateYoutubeLi
 import { useCollection } from "../lib/hooks";
 import { computeWindow, fmtDayIST, fmtTimeIST } from "../lib/time";
 import {
-  buildValues, DEFAULT_ZOOM_VIA, momentWindow, passcodeDue, WEEKDAYS, renderTemplate, sourcesOf,
+  asDate, buildValues, DEFAULT_ZOOM_VIA, momentWindow, passcodeDue, WEEKDAYS, renderTemplate, sourcesOf,
   type Automation, type Device, type Moment, type TotalGroup, type YoutubeSource,
 } from "../lib/types";
 import { Empty, Field, Icon, Notice, Segmented, Switch, useUi } from "../components/ui";
@@ -50,7 +50,7 @@ export default function Automations({ email, onStarted, editId, onEditOpened }: 
     const ok = await confirm({
       title: `Start “${a.name}”?`,
       body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.` +
-        (a.youtube.some((y) => y.mode === "event") && (!a.linksUpdatedAt || fmtDayIST(a.linksUpdatedAt.toDate()) !== "Today")
+        (a.youtube.some((y) => y.mode === "event") && (!a.linksUpdatedAt || fmtDayIST(asDate(a.linksUpdatedAt)) !== "Today")
           ? "\n\nThe live event link wasn’t changed today. Check it first if it’s a new stream."
           : ""),
       confirm: "Start",
@@ -477,7 +477,7 @@ function QuickLinks({ a }: { a: Automation }) {
   const [urls, setUrls] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState(false);
   if (events.length === 0) return null;
-  const updated = a.linksUpdatedAt?.toDate();
+  const updated = asDate(a.linksUpdatedAt);
   const today = updated && fmtDayIST(updated) === "Today";
 
   function begin() {
