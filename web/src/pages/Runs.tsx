@@ -154,7 +154,7 @@ function StatTile({ r, k, p, active }: { r: Run; k: string; p: Peak; active: boo
     setSaving(true);
     try {
       await setManualPeak(r, k, n, auth.currentUser?.email ?? "someone");
-      toast(r.smsText ? "Saved. Tap Resend SMS to send the new numbers." : "Saved. It will be used in the SMS.");
+      toast(r.smsText ? "Saved. Tap Resend SMS to send the new numbers." : "Saved. Counting goes on, and a higher count will replace it.");
       setEditing(false);
     } catch (e) {
       toast((e as Error).message);
@@ -187,9 +187,10 @@ function StatTile({ r, k, p, active }: { r: Run; k: string; p: Peak; active: boo
           <div className="stat-value">{fmtN(p.peak)}</div>
           <div className="stat-sub">
             {active && p.current !== null && p.current !== undefined ? `Now ${fmtN(p.current)} · ` : ""}
-            {p.manualBy ? `entered by ${p.manualBy.split("@")[0]}` : p.peakAt ? `peak ${fmtTimeIST(p.peakAt.toDate())}` : "no reading yet"}
+            {p.manualBy ? `typed by ${p.manualBy.split("@")[0]}` : p.peakAt ? `peak ${fmtTimeIST(p.peakAt.toDate())}` : "no reading yet"}
           </div>
-          {p.note && !p.manualBy && <div className="stat-note">{p.note}</div>}
+          {p.manualBy && active && <div className="stat-sub">Still counting. A higher count replaces it.</div>}
+          {p.note && <div className="stat-note">{p.note}</div>}
           {p.peak == null && p.note && (
             <button className="btn btn-sm" style={{ marginTop: 10 }} onClick={() => { setVal(""); setEditing(true); }}>Enter by hand</button>
           )}
