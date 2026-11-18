@@ -35,6 +35,13 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:label="Zoom" />
 
+        <activity
+            android:name=".ZoomSignInActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Sign in to Zoom" />
+
         <service
             android:name=".CounterService"
             android:exported="false"

@@ -222,6 +222,21 @@ class MainActivity : AppCompatActivity() {
         phoneCard.addView(simRow(), lp(top = 6, h = 48))
         root.addView(phoneCard, lp(top = 10))
 
+        // Zoom account
+        root.addView(sectionTitle("Zoom account"), lp(top = 28))
+        val zoomIn = prefs.zoomSignedIn
+        root.addView(list(
+            rowBase().apply {
+                addView(twoLines(if (zoomIn) "Signed in" else "Not signed in",
+                    if (zoomIn) "The counter joins as this Zoom account" else "Sign in so the counter skips the waiting room and robot checks"),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(button(if (zoomIn) "Change" else "Sign in", if (zoomIn) Style.OUTLINE else Style.PRIMARY) {
+                    startActivity(Intent(this@MainActivity, ZoomSignInActivity::class.java))
+                }.apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f); setPadding(dp(14), 0, dp(14), 0) },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)))
+            },
+        ), lp(top = 10))
+
         // Test SMS
         root.addView(sectionTitle("Test SMS"), lp(top = 28))
         val testCard = card()

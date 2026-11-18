@@ -199,7 +199,7 @@ class ZoomWatcher(
         /** Watchers by run id, so the screen can show one. */
         val active = ConcurrentHashMap<String, ZoomWatcher>()
 
-        private const val DESKTOP_UA =
+        const val DESKTOP_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         fun parseLink(link: String, passcode: String?): Pair<String, String?> {
