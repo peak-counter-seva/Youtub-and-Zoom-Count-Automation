@@ -47,6 +47,7 @@ export interface Peak {
   peakAt: Timestamp | null;
   lastAt: Timestamp | null;
   note?: string;
+  manualBy?: string; // email of the person who typed this peak in
 }
 
 export interface Run {
