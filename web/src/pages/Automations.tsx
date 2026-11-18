@@ -144,6 +144,9 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const tplRef = useRef<HTMLTextAreaElement>(null);
+  // Only one stream / total / moment is open at a time; the rest are one-line rows.
+  const [open, setOpen] = useState<string | null>(null);
+  const toggle = (id: string) => setOpen((o) => (o === id ? null : id));
   const [liveCount, setLiveCount] = useState(0);
   useEffect(() => {
     if (value.id) liveRunsOf(value.id).then((r) => setLiveCount(r.length)).catch(() => {});
@@ -204,8 +207,8 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
     if (moments.some((m) => !m.at)) return setErr("Each moment needs a time.");
     if (a.youtube.some((y) => !y.url.trim())) return setErr("Every YouTube stream needs a link (or a channel link to search).");
     if (a.youtube.some((y) => y.findTitle !== undefined && !y.findTitle.trim())) return setErr("Enter words from the live stream’s title, or switch back to a fixed link.");
-    if (a.youtube.some((y) => y.mode === "window" && (!y.windowStart || !y.windowEnd)))
-      return setErr("24×7 streams need a from and to time.");
+    if (a.youtube.some((y) => y.mode === "window" && y.windowStart !== undefined && (!y.windowStart || !y.windowEnd)))
+      return setErr("Fill in both custom times, or choose “Whole automation time”.");
     if (a.zoom.enabled && !a.zoom.link.trim()) return setErr("Add the Zoom invite link, or turn Zoom off.");
     if (!a.sms.to.trim()) return setErr("Add the phone number the SMS goes to.");
     setSaving(true);
@@ -239,11 +242,20 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <p>All times are India time (IST).</p>
         </div>
       </div>
+      <nav className="jumpbar" aria-label="Sections">
+        {([["sec-basics", "Basics", ""], ["sec-streams", "Streams", String(a.youtube.length)], ["sec-zoom", "Zoom", ""],
+           ["sec-totals", "Totals", totals.length ? String(totals.length) : ""], ["sec-moments", "Moments", moments.length ? String(moments.length) : ""],
+           ["sec-sms", "SMS", ""]] as const).map(([id, label, n]) => (
+          <button type="button" key={id} onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+            {label}{n && <b>{n}</b>}
+          </button>
+        ))}
+      </nav>
       {liveCount > 0 && (
         <Notice tone="info">This automation is counting now. When you save, the live run switches to the new links and settings within a minute. Its start and end times stay the same.</Notice>
       )}
 
-      <section className="card card-pad">
+      <section className="card card-pad" id="sec-basics">
         <div className="form-section-head">
           <div><h2>Basics</h2><p>Name and the time to count.</p></div>
         </div>
@@ -296,20 +308,22 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
         </p>
       </section>
 
-      <section className="card card-pad form-section">
+      <section className="card card-pad form-section" id="sec-streams">
         <div className="form-section-head">
           <div><h2>YouTube streams</h2><p>Highest live viewers for each stream.</p></div>
         </div>
         {a.youtube.length === 0 && <p className="muted small">No streams. Add one below.</p>}
+        <div className="source-grid">
         {a.youtube.map((y, i) => (
-          <div className="source" key={i}>
-            <div className="source-head">
-              <div className="label"><Icon name="video" size={16} /> Stream {i + 1}</div>
-              <button className="btn btn-ghost btn-sm btn-icon" aria-label="Remove stream"
-                onClick={() => set({ youtube: a.youtube.filter((_, j) => j !== i) })}>
-                <Icon name="trash" size={15} />
-              </button>
-            </div>
+          <div className={`source ${open === `yt${i}` ? "open" : "closed"}`} key={i}>
+            <RowHead open={open === `yt${i}`} onToggle={() => toggle(`yt${i}`)} icon="video"
+              title={y.label || `Stream ${i + 1}`} tag={y.key}
+              sub={[y.mode === "window" ? "24×7" : "Live event", y.mode === "event" && y.findTitle !== undefined ? `finds “${y.findTitle}”` : shortUrl(y.url), y.pollSeconds ? `every ${fmtSecs(y.pollSeconds)}` : ""].filter(Boolean).join(" · ")}
+              onRemove={async () => {
+                if (await confirm({ title: `Remove “${y.label || `Stream ${i + 1}`}”?`, body: "Its count won’t be in the SMS any more.", confirm: "Remove", danger: true }))
+                  { set({ youtube: a.youtube.filter((_, j) => j !== i) }); setOpen(null); }
+              }} />
+            {open === `yt${i}` && (<div className="source-body">
             {y.mode === "event" && (
               <div className="field" style={{ marginBottom: 4 }}>
                 <span>Today’s stream</span>
@@ -345,9 +359,17 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
               <span>Stream type</span>
               <Segmented value={y.mode} onChange={(m) => setYt(i, { mode: m })}
                 options={[{ value: "event", label: "Live event" }, { value: "window", label: "24×7 stream" }]} />
-              <span className="hint">{y.mode === "event" ? "Counted whenever it is live during the run." : "Counted only between the times below."}</span>
+              <span className="hint">{y.mode === "event" ? "Counted whenever it is live during the run." : (y.windowStart !== undefined ? "Counted only between the times below." : `Counted for the automation’s own time (${a.startTime} – ${a.endTime}).`)}</span>
             </div>
             {y.mode === "window" && (
+              <div className="field" style={{ marginTop: 12 }}>
+                <span>Count during</span>
+                <Segmented value={y.windowStart !== undefined ? "custom" : "all"}
+                  onChange={(v) => setYt(i, v === "custom" ? { windowStart: a.startTime, windowEnd: a.endTime } : { windowStart: undefined, windowEnd: undefined })}
+                  options={[{ value: "all", label: "Whole automation time" }, { value: "custom", label: "Custom times" }]} />
+              </div>
+            )}
+            {y.mode === "window" && y.windowStart !== undefined && (
               <div className="field-grid" style={{ ["--cols" as string]: 2 }}>
                 <Field label="From"><input className="input" type="time" value={y.windowStart ?? ""} onChange={(e) => setYt(i, { windowStart: e.target.value })} /></Field>
                 <Field label="To"><input className="input" type="time" value={y.windowEnd ?? ""} onChange={(e) => setYt(i, { windowEnd: e.target.value })} /></Field>
@@ -359,14 +381,16 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
                 {POLL_CHOICES.map((s) => <option key={s} value={s}>{fmtSecs(s)}</option>)}
               </select>
             </Field>
+            </div>)}
           </div>
         ))}
-        <button className="btn add-source" onClick={() => set({ youtube: [...a.youtube, { key: `yt${a.youtube.length + 1}`, label: `YouTube ${a.youtube.length + 1}`, url: "", mode: "event" }] })}>
+        </div>
+        <button className="btn add-source" onClick={() => { set({ youtube: [...a.youtube, { key: `yt${a.youtube.length + 1}`, label: `YouTube ${a.youtube.length + 1}`, url: "", mode: "event" }] }); setOpen(`yt${a.youtube.length}`); }}>
           <Icon name="plus" size={16} /> Add stream
         </button>
       </section>
 
-      <section className="card card-pad form-section">
+      <section className="card card-pad form-section" id="sec-zoom">
         <div className="form-section-head" style={{ marginBottom: a.zoom.enabled ? 16 : 0 }}>
           <div><h2>Zoom meeting</h2><p>Highest number of participants.</p></div>
           <Switch on={a.zoom.enabled} onChange={(v) => setZoom({ enabled: v })} label="Count Zoom" />
@@ -405,18 +429,18 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
         )}
       </section>
 
-      <section className="card card-pad form-section">
+      <section className="card card-pad form-section" id="sec-totals">
         <div className="form-section-head">
           <div><h2>Totals</h2><p>Add counts together for the SMS. {"{total}"} already adds up everything.</p></div>
         </div>
+        <div className="source-grid">
         {totals.map((g, i) => (
-          <div className="source" key={i}>
-            <div className="source-head">
-              <div className="label"><Icon name="plus" size={16} /> Total {i + 1}</div>
-              <button className="btn btn-ghost btn-sm btn-icon" aria-label="Remove total" onClick={() => set({ totals: totals.filter((_, j) => j !== i) })}>
-                <Icon name="trash" size={15} />
-              </button>
-            </div>
+          <div className={`source ${open === `t${i}` ? "open" : "closed"}`} key={i}>
+            <RowHead open={open === `t${i}`} onToggle={() => toggle(`t${i}`)} icon="plus"
+              title={g.label || `Total ${i + 1}`} tag={g.key}
+              sub={g.sources.map((k) => sources.find((x) => x.key === k)?.label ?? k).join(" + ") || "nothing ticked yet"}
+              onRemove={() => { set({ totals: totals.filter((_, j) => j !== i) }); setOpen(null); }} />
+            {open === `t${i}` && (<div className="source-body">
             <div className="field-grid" style={{ ["--cols" as string]: 2, gridTemplateColumns: "minmax(0,1fr) 110px" }}>
               <Field label="Name"><input className="input" value={g.label} onChange={(e) => setTotal(i, { label: e.target.value })} placeholder="All YouTube" /></Field>
               <Field label="SMS tag"><input className="input" value={g.key} onChange={(e) => setTotal(i, { key: e.target.value })} /></Field>
@@ -435,25 +459,26 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
                 })}
               </div>
             </div>
+            </div>)}
           </div>
         ))}
-        <button className="btn add-source" onClick={() => set({ totals: [...totals, { key: `sum${totals.length + 1}`, label: "", sources: [] }] })}>
+        </div>
+        <button className="btn add-source" onClick={() => { set({ totals: [...totals, { key: `sum${totals.length + 1}`, label: "", sources: [] }] }); setOpen(`t${totals.length}`); }}>
           <Icon name="plus" size={16} /> Add a total
         </button>
       </section>
 
-      <section className="card card-pad form-section">
+      <section className="card card-pad form-section" id="sec-moments">
         <div className="form-section-head">
           <div><h2>Moments</h2><p>Note the highest counts in every stream and Zoom at a set time, like Aarti. You can also mark one live from Runs.</p></div>
         </div>
+        <div className="source-grid">
         {moments.map((m, i) => (
-          <div className="source" key={i}>
-            <div className="source-head">
-              <div className="label"><Icon name="clock" size={16} /> {m.label || `Moment ${i + 1}`}</div>
-              <button className="btn btn-ghost btn-sm btn-icon" aria-label="Remove moment" onClick={() => set({ moments: moments.filter((_, j) => j !== i) })}>
-                <Icon name="trash" size={15} />
-              </button>
-            </div>
+          <div className={`source ${open === `m${i}` ? "open" : "closed"}`} key={i}>
+            <RowHead open={open === `m${i}`} onToggle={() => toggle(`m${i}`)} icon="clock"
+              title={m.label || `Moment ${i + 1}`} tag={m.key} sub={`${m.at} for ${m.minutes} min`}
+              onRemove={() => { set({ moments: moments.filter((_, j) => j !== i) }); setOpen(null); }} />
+            {open === `m${i}` && (<div className="source-body">
             <div className="field-grid" style={{ ["--cols" as string]: 2, gridTemplateColumns: "minmax(0,1fr) 110px" }}>
               <Field label="Name"><input className="input" value={m.label} onChange={(e) => setMoment(i, { label: e.target.value })} placeholder="Aarti" /></Field>
               <Field label="SMS tag"><input className="input" value={m.key} onChange={(e) => setMoment(i, { key: e.target.value })} /></Field>
@@ -466,14 +491,16 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
                 </select>
               </Field>
             </div>
+            </div>)}
           </div>
         ))}
-        <button className="btn add-source" onClick={() => set({ moments: [...moments, { key: moments.length ? `m${moments.length + 1}` : "aarti", label: moments.length ? "" : "Aarti", at: "06:00", minutes: 30 }] })}>
+        </div>
+        <button className="btn add-source" onClick={() => { setOpen(`m${moments.length}`); set({ moments: [...moments, { key: moments.length ? `m${moments.length + 1}` : "aarti", label: moments.length ? "" : "Aarti", at: "06:00", minutes: 30 }] }); }}>
           <Icon name="plus" size={16} /> Add a moment
         </button>
       </section>
 
-      <section className="card card-pad form-section">
+      <section className="card card-pad form-section" id="sec-sms">
         <div className="form-section-head">
           <div><h2>SMS</h2><p>Sent from a member’s phone when the run ends.</p></div>
         </div>
@@ -587,6 +614,34 @@ function QuickLinks({ a }: { a: Automation }) {
         <button className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>Cancel</button>
         <button className="btn btn-primary btn-sm" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save links"}</button>
       </div>
+    </div>
+  );
+}
+
+function shortUrl(u: string) {
+  const t = u.trim().replace(/^https?:\/\/(www\.)?/, "");
+  return t ? (t.length > 34 ? t.slice(0, 33) + "…" : t) : "no link yet";
+}
+
+/** One-line summary of a stream / total / moment. Tap to open its settings. */
+function RowHead({ open, onToggle, icon, title, tag, sub, onRemove }: {
+  open: boolean; onToggle: () => void; icon: "video" | "plus" | "clock"; title: string; tag: string; sub: string; onRemove: () => void;
+}) {
+  return (
+    <div className="row-head">
+      <button type="button" className="row-main" onClick={onToggle} aria-expanded={open}>
+        <Icon name={icon} size={16} />
+        <span className="row-text">
+          <span className="row-title">{title} <code>{`{${tag}}`}</code></span>
+          <span className="row-sub">{sub}</span>
+        </span>
+        <span className={`row-chev ${open ? "up" : ""}`}><Icon name="chevron" size={16} /></span>
+      </button>
+      {open && (
+        <button type="button" className="btn btn-ghost btn-sm btn-icon" aria-label={`Remove ${title}`} onClick={onRemove}>
+          <Icon name="trash" size={15} />
+        </button>
+      )}
     </div>
   );
 }

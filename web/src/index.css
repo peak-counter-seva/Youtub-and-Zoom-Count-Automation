@@ -371,3 +371,28 @@ details.log pre { margin: 10px 0 0; font: 11.5px/1.55 ui-monospace, "SF Mono", M
 .auto-start b { font-size: 14px; font-weight: 600; }
 .auto-start p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .msg-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Compact rows for streams, totals and moments: one line each, tap to open */
+.source-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+@media (min-width: 720px) { .source-grid { grid-template-columns: 1fr 1fr; } }
+.source-grid .source + .source { margin-top: 0; }
+.source.closed { padding: 0; }
+.source.open { grid-column: 1 / -1; border-color: var(--accent); background: var(--surface); }
+.row-head { display: flex; align-items: center; gap: 4px; }
+.source.open .row-head { margin: -6px -6px 6px; }
+.row-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-align: left; border-radius: 10px; }
+.row-main > svg { color: var(--muted); flex: none; }
+.row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.row-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-title code { font: 500 12px ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); background: rgba(14, 107, 85, 0.08); padding: 1px 5px; border-radius: 5px; margin-left: 4px; }
+.row-sub { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+.row-chev { color: var(--muted); display: grid; transform: rotate(90deg); transition: transform .15s; }
+.row-chev.up { transform: rotate(-90deg); }
+.source-body { padding-top: 4px; }
+/* Jump bar between editor sections */
+.jumpbar { position: sticky; top: 56px; z-index: 5; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin: 0 0 8px; background: var(--bg); scrollbar-width: none; }
+.jumpbar::-webkit-scrollbar { display: none; }
+.jumpbar button { flex: none; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--surface); font: inherit; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.jumpbar button:hover { border-color: var(--accent); color: var(--accent); }
+.jumpbar b { font-weight: 600; color: var(--muted); margin-left: 4px; }
+.form-section, #sec-basics { scroll-margin-top: 112px; }
