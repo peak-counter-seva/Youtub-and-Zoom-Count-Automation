@@ -26,6 +26,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -35,7 +37,9 @@ import java.util.TimeZone
  *  - sends SMS jobs addressed to this phone from its SIM,
  *  - keeps this phone marked online in the web app,
  *  - backup: if the GitHub counter goes quiet during a run that sends from this phone,
- *    counts YouTube itself and sends the result at the end time (Zoom is not counted here).
+ *    counts YouTube itself and sends the result at the end time,
+ *  - Zoom: joins the meeting in a hidden browser on this phone and counts participants
+ *    (see [ZoomWatcher]); this works from home internet where Zoom often blocks cloud servers.
  */
 class CounterService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -45,6 +49,24 @@ class CounterService : Service() {
     private var runListener: ListenerRegistration? = null
     private val activeRuns = mutableMapOf<String, DocumentSnapshot>()
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /** Zoom counting sessions by run id. Touched only on the main thread. */
+    private val zoomSessions = mutableMapOf<String, ZoomSession>()
+    private val zoomFailed = mutableSetOf<String>()
+
+    private class ZoomSession(val key: String, val label: String, val step: Int) {
+        lateinit var watcher: ZoomWatcher
+        @Volatile var count: Int? = null
+        @Volatile var state: String = "starting"
+        @Volatile var localPeak: Int? = null
+        @Volatile var localPeakAt: Timestamp? = null
+        @Volatile var savedValue: Int? = null
+        @Volatile var savedPeak: Int? = null
+        @Volatile var savedState: String = ""
+        @Volatile var lastSave = 0L
+        @Volatile var saving = false
+        var captchaShown = false
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -69,11 +91,14 @@ class CounterService : Service() {
             listenRuns()
             scope.launch { heartbeatLoop(user.uid, user.email ?: "") }
             scope.launch { backupLoop() }
+            scope.launch { zoomLoop() }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        zoomSessions.values.forEach { it.watcher.stop() }
+        zoomSessions.clear()
         smsListener?.remove()
         runListener?.remove()
         scope.cancel()
@@ -275,6 +300,169 @@ class CounterService : Service() {
                 "status" to "pending", "createdAt" to FieldValue.serverTimestamp(),
             ))
         }.await()
+    }
+
+    // ---------- Zoom counting on this phone ----------
+
+    private suspend fun zoomLoop() {
+        while (scope.isActive) {
+            val runs = synchronized(activeRuns) { activeRuns.values.toList() }
+            val nowS = Timestamp.now().seconds
+            val want = mutableMapOf<String, DocumentSnapshot>()
+            for (d in runs) {
+                @Suppress("UNCHECKED_CAST")
+                val cfg = d.get("config") as? Map<String, Any?> ?: continue
+                @Suppress("UNCHECKED_CAST")
+                val z = cfg["zoom"] as? Map<String, Any?> ?: continue
+                if (z["enabled"] != true || z["via"] == "github") continue
+                if ((z["link"] as? String).isNullOrBlank()) continue
+                val start = d.getTimestamp("startAt")?.seconds ?: continue
+                val end = d.getTimestamp("endAt")?.seconds ?: continue
+                if (d.getBoolean("stopRequested") == true) continue
+                // Join 2 minutes early; stay until just after the end so the last peak is saved
+                // before the GitHub counter writes the SMS (it waits 30 s for this).
+                if (nowS >= start - 120 && nowS < end + 15) want[d.id] = d
+            }
+            withContext(Dispatchers.Main) {
+                for (id in zoomSessions.keys.toList()) {
+                    if (id !in want) {
+                        val s = zoomSessions.remove(id) ?: continue
+                        s.watcher.stop()
+                        cancelCaptcha()
+                        scope.launch { saveZoom(id, s); note(id, "Phone: left Zoom. Highest seen ${s.localPeak ?: "none"}.") }
+                    }
+                }
+                for ((id, d) in want) if (id !in zoomSessions && id !in zoomFailed) startZoom(id, d)
+            }
+            delay(10_000L)
+        }
+    }
+
+    private fun startZoom(id: String, d: DocumentSnapshot) {
+        @Suppress("UNCHECKED_CAST")
+        val cfg = d.get("config") as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST")
+        val z = cfg["zoom"] as Map<String, Any?>
+        val s = ZoomSession(
+            key = (z["key"] as? String)?.ifBlank { null } ?: "zoom",
+            label = (z["label"] as? String)?.ifBlank { null } ?: "Zoom",
+            step = ((cfg["saveStep"] as? Number)?.toInt() ?: 5).coerceAtLeast(1),
+        )
+        try {
+            s.watcher = ZoomWatcher(
+                this, id, d.getString("automationName") ?: "Zoom",
+                z["link"] as String, z["passcode"] as? String,
+                (z["displayName"] as? String)?.ifBlank { null } ?: "Count",
+            ) { c, st -> onZoomReading(id, s, c, st) }
+        } catch (e: IllegalArgumentException) {
+            zoomFailed += id
+            scope.launch { note(id, "Phone: ${e.message}") }
+            return
+        }
+        zoomSessions[id] = s
+        s.watcher.start()
+        wakeLock?.acquire(15 * 60_000L)
+        updateNotification("Counting Zoom: ${s.watcher.title}")
+        scope.launch {
+            note(id, if (android.provider.Settings.canDrawOverlays(this@CounterService)) "Phone: opening Zoom to count participants."
+                     else "Phone: opening Zoom without 'Display over other apps' permission; counting may pause when the screen is off.")
+        }
+    }
+
+    /** Main thread. Keeps the exact peak; saves only on real changes, new peaks, or once a minute. */
+    private fun onZoomReading(id: String, s: ZoomSession, count: Int?, state: String) {
+        val nowMs = System.currentTimeMillis()
+        s.count = count
+        s.state = state
+        if (count != null && (s.localPeak == null || count > s.localPeak!!)) {
+            s.localPeak = count
+            s.localPeakAt = Timestamp.now()
+        }
+        if (state == "captcha" && !s.captchaShown) { s.captchaShown = true; notifyCaptcha(id, s.watcher.title) }
+        if (state != "captcha" && s.captchaShown) { s.captchaShown = false; cancelCaptcha() }
+        val sv = s.savedValue
+        val sp = s.savedPeak
+        val lp = s.localPeak
+        val due = s.lastSave == 0L || nowMs - s.lastSave >= 60_000L || state != s.savedState ||
+            (count == null) != (sv == null) ||
+            (count != null && sv != null && abs(count - sv) >= s.step) ||
+            (lp != null && (sp == null || lp > sp) && nowMs - s.lastSave >= 5_000L)
+        if (due && !s.saving) {
+            s.saving = true
+            s.lastSave = nowMs
+            scope.launch {
+                try { saveZoom(id, s) } finally { s.saving = false }
+            }
+            wakeLock?.acquire(15 * 60_000L)
+            updateNotification("Zoom: " + ZoomWatcher.stateText(state, count))
+        }
+    }
+
+    private suspend fun saveZoom(id: String, s: ZoomSession) {
+        val count = s.count
+        val state = s.state
+        val peak = s.localPeak
+        val peakAt = s.localPeakAt
+        val ref = db.collection("runs").document(id)
+        val now = Timestamp.now()
+        try {
+            db.runTransaction { tx ->
+                val cur = tx.get(ref)
+                @Suppress("UNCHECKED_CAST")
+                val peaks = (cur.get("peaks") as? Map<String, Map<String, Any?>> ?: emptyMap()).toMutableMap()
+                val p = (peaks[s.key] ?: emptyMap()).toMutableMap()
+                p["label"] = s.label
+                val last = p["lastAt"] as? Timestamp
+                val fresh = last != null && now.seconds - last.seconds < 30
+                if (count != null || !fresh) {
+                    p["current"] = count
+                    p["note"] = if (count != null) "counted by phone" else "phone: " + ZoomWatcher.stateText(state, null)
+                }
+                if (count != null) p["lastAt"] = now
+                val old = (p["peak"] as? Number)?.toLong()
+                if (peak != null && (old == null || peak.toLong() > old)) {
+                    p["peak"] = peak
+                    p["peakAt"] = peakAt ?: now
+                }
+                peaks[s.key] = p
+                tx.update(ref, mapOf("peaks" to peaks, "zoomPhoneAt" to now))
+                null
+            }.await()
+            s.savedValue = count
+            if (peak != null) s.savedPeak = peak
+            s.savedState = state
+        } catch (e: Exception) {
+            Log.w(TAG, "zoom save failed", e)
+        }
+    }
+
+    private suspend fun note(id: String, msg: String) {
+        try {
+            db.collection("runs").document(id).update("log", FieldValue.arrayUnion("${clock()} $msg")).await()
+        } catch (e: Exception) { Log.w(TAG, "note failed", e) }
+    }
+
+    private fun notifyCaptcha(runId: String, title: String) {
+        val open = PendingIntent.getActivity(
+            this, 2,
+            Intent(this, ZoomActivity::class.java).putExtra(ZoomActivity.EXTRA_RUN, runId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val n = NotificationCompat.Builder(this, App.ALERTS)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setColor(0xFF0E6B55.toInt())
+            .setContentTitle("Zoom needs one tap")
+            .setContentText("Tap to finish Zoom’s robot check for $title. Counting carries on after.")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("Tap to finish Zoom’s robot check for $title. Counting carries on after."))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(android.app.NotificationManager::class.java).notify(2, n)
+    }
+
+    private fun cancelCaptcha() {
+        getSystemService(android.app.NotificationManager::class.java).cancel(2)
     }
 
     private fun inWindow(runStart: Timestamp, from: String?, to: String?, now: Timestamp): Boolean {

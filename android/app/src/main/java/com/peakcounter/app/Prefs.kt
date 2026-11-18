@@ -23,4 +23,9 @@ class Prefs(ctx: Context) {
     var serviceEnabled: Boolean
         get() = p.getBoolean("enabled", false)
         set(v) = p.edit().putBoolean("enabled", v).apply()
+
+    /** True once someone signed in to a Zoom account in the app's browser. */
+    var zoomSignedIn: Boolean
+        get() = p.getBoolean("zoomSignedIn", false)
+        set(v) = p.edit().putBoolean("zoomSignedIn", v).apply()
 }
