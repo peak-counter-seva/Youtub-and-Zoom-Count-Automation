@@ -91,6 +91,12 @@ class ZoomWatcher(
         wrapper.baseContext = activity
         container.addView(wv, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         shownInActivity = true
+        // A WebView moved from the hidden window into a screen can stay blank until it is told to redraw.
+        wv.visibility = android.view.View.VISIBLE
+        wv.alpha = 1f
+        wv.onResume()
+        wv.resumeTimers()
+        wv.post { wv.requestLayout(); wv.invalidate() }
     }
 
     /** Put the browser back into the hidden overlay when the Activity closes. */
@@ -100,6 +106,13 @@ class ZoomWatcher(
         detachFromAnything()
         wrapper.baseContext = service
         if (!stopped) attachOverlay()
+    }
+
+    /** Load the join page again now (from the Zoom screen's Reload button). */
+    fun reloadNow() {
+        if (stopped) return
+        notJoinedSince = System.currentTimeMillis()
+        load()
     }
 
     // ---------- internals ----------
@@ -281,8 +294,20 @@ function(name, pwd) {
     return { count: null, state: 'in_meeting' };
 
   var text = docs.map(function (d) { return (d.body && d.body.innerText) || ''; }).join(' ').toLowerCase();
-  if (/captcha|not a robot|verify you are human|security check/.test(text) || all('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha').length)
-    return { count: null, state: 'captcha' };
+  // Only a robot check that is really on screen counts. Zoom's join page always carries an invisible
+  // reCAPTCHA and the line "protected by reCAPTCHA", which must not stop the join.
+  function challengeShown() {
+    if (/i['\u2019]?m not a robot|verify you are human|select all images|complete the security check/.test(text)) return true;
+    var frames = all('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]');
+    for (var i = 0; i < frames.length; i++) {
+      var f = frames[i], src = f.getAttribute('src') || '';
+      if (/size=invisible/.test(src)) continue;
+      var r = f.getBoundingClientRect(), cs = (f.ownerDocument.defaultView || window).getComputedStyle(f);
+      if (r.width > 100 && r.height > 60 && r.bottom > 0 && r.top < 4000 && cs.visibility === 'visible' && cs.display !== 'none' && cs.opacity !== '0') return true;
+    }
+    return false;
+  }
+  if (challengeShown()) return { count: null, state: 'captcha' };
   if (/meeting has been ended|this meeting has ended|you have been removed|removed you from/.test(text)) return { count: null, state: 'ended' };
   if (/sign in to join|only authenticated users/.test(text)) return { count: null, state: 'signin' };
 

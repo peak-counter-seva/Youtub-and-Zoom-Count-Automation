@@ -50,6 +50,13 @@ class ZoomActivity : AppCompatActivity() {
         texts.addView(title); texts.addView(status)
         bar.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(TextView(this).apply {
+            text = "Reload"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(Color.parseColor("#4A4F59"))
+            setPadding((12 * d).toInt(), (8 * d).toInt(), (12 * d).toInt(), (8 * d).toInt())
+            setOnClickListener { watcher?.reloadNow() }
+        })
+        bar.addView(TextView(this).apply {
             text = "Done"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setTextColor(Color.parseColor("#0E6B55"))
