@@ -10,7 +10,7 @@ export interface YoutubeSource {
   windowStart?: string; // "HH:MM" (Asia/Kolkata), window mode only
   windowEnd?: string;
   pollSeconds?: number; // how often to check this stream; default = automation pollSeconds
-  findTitle?: string; // live event: url is a channel link; use the channel's live stream whose title contains this
+  findTitle?: string; // url is a channel link; use the channel's live stream whose title contains this
 }
 
 /** A sum of several sources, e.g. all YouTube streams. Used in the SMS as {key}. */
