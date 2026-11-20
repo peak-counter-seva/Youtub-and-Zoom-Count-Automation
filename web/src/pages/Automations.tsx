@@ -49,10 +49,7 @@ export default function Automations({ email, onStarted, editId, onEditOpened }: 
     const { start, end } = computeWindow(a.startTime, a.endTime);
     const ok = await confirm({
       title: `Start “${a.name}”?`,
-      body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.` +
-        (a.youtube.some((y) => y.mode === "event" && y.findTitle === undefined) && (!a.linksUpdatedAt || fmtDayIST(asDate(a.linksUpdatedAt)) !== "Today")
-          ? "\n\nThe live event link wasn’t changed today. Check it first if it’s a new stream."
-          : ""),
+      body: `Counting runs ${fmtDayIST(start).toLowerCase()} from ${fmtTimeIST(start)} to ${fmtTimeIST(end)} IST. The SMS is sent when it ends.`,
       confirm: "Start",
     });
     if (!ok) return;
@@ -320,26 +317,26 @@ function Editor({ value, email, onDone }: { value: Automation; email: string; on
           <div className={`source ${open === `yt${i}` ? "open" : "closed"}`} key={i}>
             <RowHead open={open === `yt${i}`} onToggle={() => toggle(`yt${i}`)} icon="video"
               title={y.label || `Stream ${i + 1}`} tag={y.key}
-              sub={[y.mode === "window" ? "24×7" : "Live event", y.mode === "event" && y.findTitle !== undefined ? `finds “${y.findTitle}”` : shortUrl(y.url), y.pollSeconds ? `every ${fmtSecs(y.pollSeconds)}` : ""].filter(Boolean).join(" · ")}
+              sub={[y.mode === "window" ? "24×7" : "Live event", y.findTitle !== undefined ? `finds “${y.findTitle}”` : shortUrl(y.url), y.pollSeconds ? `every ${fmtSecs(y.pollSeconds)}` : ""].filter(Boolean).join(" · ")}
               onRemove={async () => {
                 if (await confirm({ title: `Remove “${y.label || `Stream ${i + 1}`}”?`, body: "Its count won’t be in the SMS any more.", confirm: "Remove", danger: true }))
                   { set({ youtube: a.youtube.filter((_, j) => j !== i) }); setOpen(null); }
               }} />
             {open === `yt${i}` && (<div className="source-body">
-            {y.mode === "event" && (
+            {(
               <div className="field" style={{ marginBottom: 4 }}>
-                <span>Today’s stream</span>
+                <span>Which stream</span>
                 <Segmented value={y.findTitle !== undefined ? "find" : "link"}
                   onChange={(v) => setYt(i, { findTitle: v === "find" ? (y.findTitle ?? "") : undefined })}
                   options={[{ value: "link", label: "Paste link" }, { value: "find", label: "Find on channel" }]} />
                 <span className="hint">
                   {y.findTitle !== undefined
-                    ? "Each time it counts, it looks on the channel for a live stream whose title has these words. No daily link change needed."
-                    : "Change the link from the automation card when there is a new stream."}
+                    ? "Each time it counts, it looks on the channel for a live stream whose title has these words. No link changes needed."
+                    : "If this stream has ended, it switches by itself to the channel’s new live or upcoming stream with a similar title, and saves the new link here."}
                 </span>
               </div>
             )}
-            {y.mode === "event" && y.findTitle !== undefined ? (
+            {y.findTitle !== undefined ? (
               <div className="field-grid stack-sm" style={{ ["--cols" as string]: 2 }}>
                 <Field label="Channel link">
                   <input className="input" inputMode="url" value={y.url} onChange={(e) => setYt(i, { url: e.target.value })} placeholder="youtube.com/@channel" />

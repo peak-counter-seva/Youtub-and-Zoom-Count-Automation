@@ -5,6 +5,7 @@ Fallback: read the public watch page when no API key is set or the API fails.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -23,6 +24,9 @@ class Reading:
     live: bool
     viewers: int | None
     note: str = ""
+    state: str = ""  # live, upcoming, none (ended or a normal video), missing
+    channel_id: str = ""
+    title: str = ""
 
 
 def video_id_from_url(url: str) -> str | None:
@@ -79,12 +83,11 @@ def _walk(o):
             yield from _walk(v)
 
 
-def find_live_by_title(channel_url: str, words: str, session: requests.Session) -> str | None:
-    """Find a channel's stream whose title contains `words`: one live now first, else an upcoming one.
+def channel_streams(channel_url: str, session: requests.Session) -> list[tuple[str, str, str]] | None:
+    """(video id, title, "live" | "upcoming" | "past") for a channel's Live tab, newest first.
 
-    Reads the channel's public Live tab page, so it costs no API units.
+    Reads the channel's public Live tab page, so it costs no API units. None if the page couldn't be read.
     """
-    want = words.strip().casefold()
     try:
         r = session.get(_channel_streams_url(channel_url), headers={"User-Agent": UA, "Accept-Language": "en"},
                         timeout=20, cookies={"CONSENT": "YES+1"})
@@ -95,21 +98,62 @@ def find_live_by_title(channel_url: str, words: str, session: requests.Session) 
     except (requests.RequestException, ValueError) as e:
         log.warning("channel search failed for %s: %s", channel_url, e)
         return None
-    live, upcoming = None, None
+    out, seen = [], set()
     for node in _walk(data):
         v = node.get("videoRenderer") or node.get("gridVideoRenderer")
-        if not isinstance(v, dict) or "videoId" not in v:
+        if not isinstance(v, dict) or "videoId" not in v or v["videoId"] in seen:
             continue
+        seen.add(v["videoId"])
         t = v.get("title") or {}
         title = t.get("simpleText") or "".join(x.get("text", "") for x in t.get("runs", []))
-        if want not in title.casefold():
-            continue
         blob = json.dumps(v.get("thumbnailOverlays", [])) + json.dumps(v.get("badges", []))
-        if "LIVE" in blob and "UPCOMING" not in blob:
-            live = live or v["videoId"]
-        elif "UPCOMING" in blob or "upcomingEventData" in v:
-            upcoming = upcoming or v["videoId"]
-    return live or upcoming
+        if "UPCOMING" in blob or "upcomingEventData" in v:
+            state = "upcoming"
+        elif "LIVE" in blob:
+            state = "live"
+        else:
+            state = "past"
+        out.append((v["videoId"], title, state))
+    return out
+
+
+def find_live_by_title(channel_url: str, words: str, session: requests.Session) -> str | None:
+    """Find a channel's stream whose title contains `words`: one live now first, else an upcoming one."""
+    want = words.strip().casefold()
+    streams = channel_streams(channel_url, session) or []
+    hits = [(vid, st) for vid, title, st in streams if want in title.casefold()]
+    return next((v for v, st in hits if st == "live"), None) or next((v for v, st in hits if st == "upcoming"), None)
+
+
+_SKIP = {"live", "the", "of", "and", "a", "in", "on", "at", "day", "date", "jan", "feb", "mar", "apr", "may", "jun",
+         "jul", "aug", "sep", "sept", "oct", "nov", "dec", "january", "february", "march", "april", "june", "july",
+         "august", "september", "october", "november", "december", "today", "session", "part"}
+
+
+def title_words(title: str) -> set[str]:
+    """Words that say what a stream is, without dates, numbers and filler."""
+    parts = re.split(r"[\s|,:;!?/()\[\]{}\-–—_.#@\"'“”‘’+&*~=•]+", title.casefold())
+    return {w for w in parts if len(w) > 1 and not any(c.isdigit() for c in w) and w not in _SKIP}
+
+
+def similarity(old: str, new: str) -> float:
+    a, b = title_words(old), title_words(new)
+    return len(a & b) / len(a) if a else 0.0
+
+
+def find_successor(channel_url: str, old_title: str, exclude: set[str], any_live: bool,
+                   session: requests.Session) -> tuple[str, str] | None:
+    """The channel's new stream that replaces one that ended: live now first, else upcoming,
+    with a title like the old one. With any_live, the channel's only live stream also counts."""
+    streams = [s for s in (channel_streams(channel_url, session) or []) if s[0] not in exclude]
+    for state in ("live", "upcoming"):
+        scored = sorted(((similarity(old_title, t), vid, t) for vid, t, st in streams if st == state), reverse=True)
+        if scored and scored[0][0] >= 0.5:
+            return scored[0][1], scored[0][2]
+    lives = [(vid, t) for vid, t, st in streams if st == "live"]
+    if any_live and len(lives) == 1:
+        return lives[0]
+    return None
 
 
 def fetch_api(ids: list[str], api_key: str, session: requests.Session) -> dict[str, Reading]:
@@ -124,11 +168,13 @@ def fetch_api(ids: list[str], api_key: str, session: requests.Session) -> dict[s
         r.raise_for_status()
         for item in r.json().get("items", []):
             lsd = item.get("liveStreamingDetails", {})
-            live = item.get("snippet", {}).get("liveBroadcastContent") == "live"
+            sn = item.get("snippet", {})
+            state = sn.get("liveBroadcastContent") or "none"
             cv = lsd.get("concurrentViewers")
-            out[item["id"]] = Reading(live=live, viewers=int(cv) if cv is not None else None)
+            out[item["id"]] = Reading(live=state == "live", viewers=int(cv) if cv is not None else None, state=state,
+                                      channel_id=sn.get("channelId", ""), title=sn.get("title", ""))
         for vid in chunk:
-            out.setdefault(vid, Reading(live=False, viewers=None, note="video not found"))
+            out.setdefault(vid, Reading(live=False, viewers=None, note="video not found", state="missing"))
     return out
 
 
@@ -143,7 +189,14 @@ def fetch_page(vid: str, session: requests.Session) -> Reading:
     if not m:
         m = re.search(r'([\d,]+) watching now', text)
     viewers = int(m.group(1).replace(",", "")) if (m and live) else None
-    return Reading(live=live, viewers=viewers, note="read from page")
+    upcoming = '"isUpcoming":true' in text
+    ch = re.search(r'"channelId":"(UC[A-Za-z0-9_-]{22})"', text)
+    tm = re.search(r'<meta name="title" content="([^"]*)"', text) or re.search(r'<meta property="og:title" content="([^"]*)"', text)
+    if not ch and not tm:
+        return Reading(live=False, viewers=None, note="video not found", state="missing")
+    state = "live" if live else "upcoming" if upcoming else "none"
+    return Reading(live=live, viewers=viewers, note="read from page", state=state,
+                   channel_id=ch.group(1) if ch else "", title=html.unescape(tm.group(1)) if tm else "")
 
 
 class YouTubeReader:
@@ -151,6 +204,27 @@ class YouTubeReader:
         self.api_key = api_key
         self.session = requests.Session()
         self._resolved: dict[str, tuple[str | None, float]] = {}
+        self._about: dict[str, tuple[str, str]] = {}  # video id -> (channel id, title), remembered from readings
+        self._looked: dict[str, float] = {}  # ended video id -> when we last looked for its successor
+
+    def remember(self, readings: dict[str, Reading]) -> None:
+        for vid, r in readings.items():
+            if r.channel_id:
+                self._about[vid] = (r.channel_id, r.title)
+
+    def successor(self, vid: str, r: Reading | None, exclude: set[str], any_live: bool,
+                  now_ts: float) -> tuple[str, str] | None:
+        """When a linked stream has ended (or vanished), its channel's new live stream with a similar title.
+        Looked up at most once a minute per old stream."""
+        if r is not None and r.state in ("live", "upcoming"):
+            return None
+        about = (r.channel_id, r.title) if (r is not None and r.channel_id) else self._about.get(vid)
+        if not about:
+            return None
+        if now_ts - self._looked.get(vid, 0) < 60:
+            return None
+        self._looked[vid] = now_ts
+        return find_successor(f"https://www.youtube.com/channel/{about[0]}", about[1], exclude, any_live, self.session)
 
     def id_for_title(self, url: str, words: str, now_ts: float) -> str | None:
         """Today's stream on a channel by title words. Looked up again every 2 minutes (every minute until found)."""

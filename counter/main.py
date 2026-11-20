@@ -277,9 +277,12 @@ async def main(run_id: str):
                 for s in due_now:  # set first so a failing read retries after its interval, not every tick
                     next_yt[s["key"]] = mono + polls[s["key"]]
                 if due_now:
-                    readings = await asyncio.to_thread(read_youtube, yt, due_now, windows, t)
+                    switched: list = []
+                    readings = await asyncio.to_thread(read_youtube, yt, due_now, windows, t, switched)
                     for key, r in readings.items():
                         tracker.update(key, r, t)
+                    if switched:
+                        save_new_links(db, run, data, sources, switched)
                 if zoom and zoom_box["fresh"]:
                     zoom_box["fresh"] = False
                     zn = zoom_box["value"]
@@ -421,18 +424,34 @@ def build_values(data: dict) -> dict:
     return v
 
 
-def read_youtube(yt, sources, windows, t) -> dict[str, dict]:
+def read_youtube(yt, sources, windows, t, switched: list | None = None) -> dict[str, dict]:
+    """Read the due streams. A linked stream that has ended is swapped for its channel's new live (or
+    upcoming) stream with a similar title; each swap is added to `switched` as (key, new url, title)."""
     readings: dict[str, dict] = {}
     ts = time.time()
-    fixed = [s["url"] for s in sources if not (s.get("mode") == "event" and s.get("findTitle"))]
+    fixed = [s["url"] for s in sources if not s.get("findTitle")]
     ids = yt.ids_for(fixed, ts)
     vids: dict[str, str | None] = {}
     for s in sources:
-        if s.get("mode") == "event" and s.get("findTitle"):
+        if s.get("findTitle"):
             vids[s["key"]] = yt.id_for_title(s["url"], s["findTitle"], ts)
         else:
             vids[s["key"]] = ids.get(s["url"])
     res = yt.read([v for v in vids.values() if v])
+    yt.remember(res)
+    for s in sources:
+        vid = vids.get(s["key"])
+        if s.get("findTitle") or not vid:
+            continue
+        others = {v for k, v in vids.items() if v and k != s["key"]}
+        found = yt.successor(vid, res.get(vid), others, s.get("mode") == "event", ts)
+        if found:
+            new_vid, title = found
+            log.info("%s: %s ended, switching to %s (%s)", s["key"], vid, new_vid, title)
+            vids[s["key"]] = new_vid
+            res.update(yt.read([new_vid]))
+            if switched is not None:
+                switched.append((s["key"], f"https://www.youtube.com/watch?v={new_vid}", title))
     for s in sources:
         vid = vids.get(s["key"])
         r = res.get(vid) if vid else None
@@ -441,15 +460,51 @@ def read_youtube(yt, sources, windows, t) -> dict[str, dict]:
             ws, we = windows[s["key"]]
             in_window = ws <= t < we
         if r is None:
-            note = f"no stream titled “{s['findTitle']}” yet" if s.get("findTitle") and s.get("mode") == "event" else "no live video found"
+            note = f"no stream titled “{s['findTitle']}” yet" if s.get("findTitle") else "no live video found"
             readings[s["key"]] = {"label": s["label"], "value": None, "note": note}
         elif not in_window:
             readings[s["key"]] = {"label": s["label"], "value": None, "note": "outside its time window"}
         elif not r.live or r.viewers is None:
-            readings[s["key"]] = {"label": s["label"], "value": None, "note": r.note or "not live yet"}
+            note = r.note or ("stream has ended; no new live stream on the channel yet" if r.state == "none" else "not live yet")
+            readings[s["key"]] = {"label": s["label"], "value": None, "note": note}
         else:
             readings[s["key"]] = {"label": s["label"], "value": r.viewers, "note": r.note or ""}
     return readings
+
+
+def save_new_links(db, run, data: dict, sources: list, switched: list) -> None:
+    """Keep a followed stream: put its new link in this run and in the automation, so the next run starts on it."""
+    by_key = {k: (url, title) for k, url, title in switched}
+    for s in sources:
+        if s["key"] in by_key:
+            s["url"] = by_key[s["key"]][0]
+    run.ref.update({"config.youtube": sources})
+    for k, (url, title) in by_key.items():
+        label = next((x.get("label") or k for x in sources if x["key"] == k), k)
+        run.note(f"{label}: the old stream ended, now counting the channel’s new stream “{title}”.")
+    aid = data.get("automationId")
+    if not aid:
+        return
+    ref = db.collection("automations").document(aid)
+
+    @firestore.transactional
+    def txn(tx):
+        snap = ref.get(transaction=tx)
+        if not snap.exists:
+            return
+        yts = (snap.to_dict() or {}).get("youtube") or []
+        changed = False
+        for y in yts:
+            if y.get("key") in by_key and not y.get("findTitle") and y.get("url") != by_key[y["key"]][0]:
+                y["url"] = by_key[y["key"]][0]
+                changed = True
+        if changed:
+            tx.update(ref, {"youtube": yts, "linksUpdatedAt": now()})
+
+    try:
+        txn(db.transaction())
+    except Exception as e:  # noqa: BLE001 - the run itself already has the new link
+        log.warning("could not save the new link to the automation: %s", e)
 
 
 async def read_zoom(zoom) -> int | None:
