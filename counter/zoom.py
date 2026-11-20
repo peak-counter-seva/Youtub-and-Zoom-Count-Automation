@@ -130,7 +130,7 @@ class ZoomCounter:
             body = (await self.page.content()).lower()
             if "waiting room" in body or "host will let you in" in body:
                 self.status = "in waiting room"
-            elif "captcha" in body:
+            elif await self._challenge_shown():
                 self.status = "Zoom asked for a CAPTCHA"
             elif "sign in to join" in body:
                 self.status = "meeting requires sign-in"
@@ -140,6 +140,21 @@ class ZoomCounter:
                 await self.shot(f"join-step-{step}")
         await self.shot("join-failed")
         return False
+
+    async def _challenge_shown(self) -> bool:
+        """True only for a robot check that is on screen; the join page always has an invisible reCAPTCHA."""
+        try:
+            return await self.page.evaluate("""() => {
+              const t = (document.body && document.body.innerText || '').toLowerCase();
+              if (/i['\u2019]?m not a robot|verify you are human|select all images/.test(t)) return true;
+              return [...document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]')].some(f => {
+                if (/size=invisible/.test(f.src)) return false;
+                const r = f.getBoundingClientRect(), cs = getComputedStyle(f);
+                return r.width > 100 && r.height > 60 && r.bottom > 0 && cs.visibility === 'visible' && cs.display !== 'none';
+              });
+            }""")
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _dismiss_audio(self):
         btn = await _first_visible(self.page, ["button:has-text('Continue without audio')", "button[aria-label*='close' i]"], 500)
