@@ -113,7 +113,7 @@ class ZoomCounter:
             if name_box and not await name_box.input_value():
                 await name_box.fill(self.name)
             pwd_box = await _first_visible(self.page, ["#input-for-pwd", "input[type=password]", "input[placeholder*='Passcode' i]"], 500)
-            if pwd_box and self.pwd and not await pwd_box.input_value():
+            if pwd_box and self.pwd and await pwd_box.input_value() != self.pwd:  # fill() clears old text first
                 await pwd_box.fill(self.pwd)
             # Turn off mic/camera on the preview screen when the toggles are shown.
             for sel in ["button[aria-label*='Mute' i]", "button[aria-label*='Stop Video' i]", "button[aria-label*='stop my video' i]"]:

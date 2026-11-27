@@ -120,6 +120,8 @@ class ZoomWatcher(
     @SuppressLint("SetJavaScriptEnabled")
     private fun create() {
         val wv = WebView(wrapper)
+        // No autofill: it can put an old passcode back into the box on a retry.
+        if (android.os.Build.VERSION.SDK_INT >= 26) wv.importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -129,6 +131,8 @@ class ZoomWatcher(
             builtInZoomControls = true
             displayZoomControls = false
             userAgentString = DESKTOP_UA
+            @Suppress("DEPRECATION")
+            saveFormData = false
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
@@ -273,6 +277,14 @@ function(name, pwd) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
+  // Make the box hold exactly v. On a retry Zoom (or the phone's autofill) can leave the old text in
+  // the box, so clear it first instead of typing after it.
+  function setExact(el, v) {
+    if (el.value === v) return;
+    try { el.focus(); el.select(); } catch (e) {}
+    setVal(el, '');
+    setVal(el, v);
+  }
 
   var nums = [];
   function push(s) {
@@ -315,9 +327,9 @@ function(name, pwd) {
   if (agree) { agree.click(); return { count: null, state: 'joining' }; }
 
   var nameBox = first(['#input-for-name', 'input[placeholder*="name" i]', 'input[aria-label*="name" i]']);
-  if (nameBox && !nameBox.value) setVal(nameBox, name);
+  if (nameBox && name) setExact(nameBox, name);
   var pwdBox = first(['#input-for-pwd', 'input[type=password]', 'input[placeholder*="passcode" i]']);
-  if (pwdBox && pwd && !pwdBox.value) setVal(pwdBox, pwd);
+  if (pwdBox && pwd) setExact(pwdBox, pwd);
   ['button[aria-label^="mute" i]', 'button[aria-label^="stop video" i]', 'button[aria-label^="stop my video" i]'].forEach(function (s) {
     var b = first([s]); if (b) b.click();
   });
